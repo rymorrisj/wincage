@@ -185,6 +185,10 @@ each check can and cannot prove.
 | `SandboxStage` | Enum identifying which stage of the launch/teardown pipeline an error or payload refers to. See `sandbox_event.py`. |
 | `SandboxError` | Raised by `launch()`/`reset_container()` on failure; carries `.stage` and `.suggestions`. See `sandbox_error.py`. |
 | `EXE_NAME` | Name of the host executable `launch()` spawns (default `"sandbox_host.exe"`); assignable before the first `launch()` call. See `sandbox.py`. |
+| `launch_suspended(exe, args, flags, ...)` | Starts a process suspended, natively via `CreateProcessW` or inside an AppContainer, returns a `SandboxProcess`. See `process.py` docstring. |
+| `run_under_job(executable_path, ..., process, job_name, ...)` | Creates a Job Object, assigns a suspended `SandboxProcess` to it, resumes it, returns `(SandboxProcess, WindowsJobObject)`. See `process.py` docstring. |
+| `SandboxProcess` | Process handle returned by `launch_suspended()`/`run_under_job()`; exposes `.poll()`, `.terminate()`, `.kill()`, `.wait()`, `.resume()`. See `sandbox_process.py`. |
+| `WindowsJobObject` | Win32 Job Object wrapper returned by `run_under_job()`; exposes `.set_memory_limit()`, `.set_cpu_limit()`, `.teardown()`, `.close()`. See `job.py`. |
 
 ### `wincage.checker`
 
@@ -193,6 +197,7 @@ each check can and cannot prove.
 | `run_checks(moniker_prefix=..., affects=...)` | Runs every capability probe, never raises. See `checker.py` docstring. |
 | `CheckResult` | Dataclass: `name`, `status`, `message`, `affects`. See `results.py`. |
 | `CheckStatus` | Enum: `PASS`, `FAIL`, `SKIP`. See `results.py`. |
+| `DEFAULT_MONIKER_PREFIX` | Default AppContainer moniker prefix used by `run_checks()` when `moniker_prefix` isn't passed. See `checker.py`. |
 
 ## Package layout
 
@@ -219,10 +224,10 @@ wincage/                  # sandbox core
 
 `job.py`, `process.py`, and `sandbox_process.py` implement a second, native
 (non-AppContainer) launch path built directly on a Job Object, for a host
-that wants Job Object resource limits without AppContainer confinement. It
-is not currently re-exported from `wincage/__init__.py`; import
-`launch_suspended`/`run_under_job` from `wincage.process` directly if you
-need it.
+that wants Job Object resource limits without AppContainer confinement.
+`launch_suspended`, `run_under_job`, `SandboxProcess`, and `WindowsJobObject`
+are all re-exported from `wincage/__init__.py` alongside the AppContainer
+path (see the public API reference above).
 
 ## Known limitations
 

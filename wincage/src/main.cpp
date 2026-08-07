@@ -141,8 +141,8 @@ static LaunchConfig parse_config(const JVal& j) {
 // ── build command line ────────────────────────────────────────────────────────
 
 // Quotes a single argument per the CommandLineToArgvW escaping rules, i.e.
-// the same rules Python's subprocess.list2cmdline() implements on the
-// native (non-container) launch path in launcher.py. The previous
+// the same rules Python's subprocess.list2cmdline() implements on wincage's
+// own native (non-container) launch path in process.py. The previous
 // implementation here just wrapped every argument in a bare pair of quotes:
 // an argument containing a literal '"', or ending in an odd run of '\',
 // would break out of its quoted region and let its content be reinterpreted
@@ -546,10 +546,10 @@ static int run_launch(const LaunchConfig& cfg) {
     // Close our inheritable copies. The child holds inherited duplicates.
     close_inherit_handles();
 
-    // 9. Resume. A failure here leaves the emulator permanently suspended
-    //    while stage="started" has not yet been emitted (that happens next,
-    //    in step 10), so treat it as fatal here rather than reporting a
-    //    successful start, mirroring how launcher.py's
+    // 9. Resume. A failure here leaves the target process permanently
+    //    suspended while stage="started" has not yet been emitted (that
+    //    happens next, in step 10), so treat it as fatal here rather than
+    //    reporting a successful start, mirroring how sandbox_process.py's
     //    SandboxProcess.resume() treats the equivalent Win32 call's failure
     //    as fatal on the native (non-container) path.
     DWORD resume_result = ResumeThread(pi.hThread);

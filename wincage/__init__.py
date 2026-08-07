@@ -7,6 +7,9 @@ from .sandbox_event import (
     SandboxPayload,
     SandboxStage,
 )
+from .process import launch_suspended, run_under_job
+from .sandbox_process import SandboxProcess
+from .job import WindowsJobObject
 
 EXE_NAME: str = _sandbox_module.EXE_NAME
 
@@ -30,4 +33,8 @@ __all__ = [
     "SandboxError",
     "SandboxStage",
     "BrokerFile",
+    "launch_suspended",
+    "run_under_job",
+    "SandboxProcess",
+    "WindowsJobObject",
 ]

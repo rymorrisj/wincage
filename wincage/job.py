@@ -1,23 +1,21 @@
 """
-Windows Job Object wrapper for Peach 1UP.
+Windows Job Object wrapper for process isolation and resource limits.
 
-Provides process isolation and resource limits for emulator processes running
-natively on the Windows host.  Each emulator launch gets its own named Job
-Object so multiple profiles can run without interfering with each other.
+Provides process isolation and resource limits for processes running
+natively on the Windows host.  Each launch gets its own named Job Object so
+multiple processes can run without interfering with each other.
 
-All emulator processes are launched under the current user account via
+All processes are launched under the current user account via
 ``CreateProcessW``.  If the Job Object cannot be created, the launch is
 aborted.  There is no unsandboxed fallback.
 
-Resource limits (memory cap, CPU hard cap, kill-on-close) are sourced
-exclusively from eras.yaml.  There is no per-profile override path.
+Resource limits (memory cap, CPU hard cap, kill-on-close) are supplied by the
+caller as already-resolved values; this module does not read any
+configuration itself, and there is no per-profile override path of its own.
 
-Network isolation is handled at the emulator level: backends whose emulated
-system has a network device disable it when enable_networking is false on the
-active profile (e.g. DOSBox-X NE2000, PCSX2 DEV9/SMAP, xemu Xbox Live/System
-Link, Flycast netplay/GGPO). Consoles with no network hardware (NES/Mesen,
-N64/Project64, PS1/DuckStation) have nothing to disable, so enable_networking
-is intentionally ignored there.
+Network isolation, if a target process needs it, is entirely the caller's
+responsibility; this module has no concept of network devices or per-target
+network policy.
 """
 
 import ctypes

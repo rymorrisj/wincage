@@ -1,7 +1,7 @@
 """
-Suspended process launch and Job Object assignment for Peach 1UP.
+Suspended process launch and Job Object assignment.
 
-``launch_suspended`` starts an emulator process, natively via CreateProcessW
+``launch_suspended`` starts a target process, natively via CreateProcessW
 or inside an AppContainer via the sandbox package, with its main thread
 suspended. ``run_under_job`` then creates a Windows Job Object, optionally
 applies CPU/memory limits to it, assigns the suspended process, retries once
@@ -10,10 +10,11 @@ ERROR_ACCESS_DENIED (Windows 11's default job nesting refusing a second
 assignment), and resumes the process's main thread once assignment has
 succeeded and any limits are in force.
 
-Both functions take already-resolved numbers rather than reading eras.yaml,
-the emulator catalog, or settings themselves, launcher.py owns that
-resolution (era/catalog lookups, job-name-prefix convention) and calls these
-as its two delegation points.
+Both functions take already-resolved numbers rather than reading any
+application-specific configuration themselves; resolving those values
+(resource limits, job-name conventions, and the like) is the caller's job.
+These are wincage's two public entry points for the native, non-AppContainer
+launch path.
 """
 
 import asyncio

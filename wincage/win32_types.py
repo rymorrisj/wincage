@@ -1,5 +1,5 @@
 """
-Win32 ctypes structures and constants for the Peach 1UP Job Object isolation layer.
+Win32 ctypes structures and constants for wincage's Job Object isolation layer.
 
 All structs map directly to the identically-named Win32 types.  Constants are
 prefixed with a single underscore to mark them as internal to the isolation

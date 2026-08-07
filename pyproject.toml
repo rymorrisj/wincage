@@ -18,22 +18,20 @@ requires-python = ">=3.10"
 # stdlib only (ctypes, asyncio, pathlib, typing, dataclasses, enum,
 # collections, json, os, subprocess, sys, threading, logging) or a
 # same-package relative import. The four `backend.core.logger` imports
-# (job.py, process.py, sandbox.py, sandbox_process.py) that previously made
-# this monorepo-only were swapped for stdlib `logging.getLogger(__name__)`
-# as part of this extraction, closing the extraction-readiness gap
-# README.md's "Standalone-package intent" section tracked. Zero
-# non-stdlib runtime dependency remains.
+# (job.py, process.py, sandbox.py, sandbox_process.py) that previously tied
+# this to a specific host application's logging setup were swapped for
+# stdlib `logging.getLogger(__name__)` as part of extracting this into its
+# own standalone package. Zero non-stdlib runtime dependency remains.
 dependencies = []
 
 # This directory is the wincage package root, flattened out of its original
-# location nested under peach_1up's backend/service/utils/platform/windows/.
-# It contains exactly the two packages that make up the extractable core:
-# wincage/ (including win32_types.py and sandbox_process.py, both already
-# inside it) and wincage/checker/, its nested diagnostic subpackage. The
-# Peach 1UP-specific adapter layer that resolved eras.yaml/emulator-catalog/
-# settings data before calling into wincage/ (app_container.py,
-# process/launcher.py, see README.md's "Standalone-package intent" section)
-# stays behind in peach_1up's backend/ tree, deliberately not copied here;
-# this pyproject.toml packages only the generic core.
+# location nested inside a larger application's backend tree. It contains
+# exactly the two packages that make up the extractable core: wincage/
+# (including win32_types.py and sandbox_process.py, both already inside it)
+# and wincage/checker/, its nested diagnostic subpackage. The
+# application-specific adapter layer that resolved that application's own
+# config/catalog/settings data before calling into wincage/ stays behind in
+# that application's own tree, deliberately not copied here; this
+# pyproject.toml packages only the generic core.
 [tool.setuptools]
 packages = ["wincage", "wincage.checker"]
