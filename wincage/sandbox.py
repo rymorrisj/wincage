@@ -398,8 +398,8 @@ def launch(config: SandboxConfig) -> SandboxHandle:
 
     # response["pid"] is child-controlled and is about to reach
     # OpenProcess(PROCESS_ALL_ACCESS, ...) followed by Job Object assignment
-    # with KILL_ON_JOB_CLOSE (see launcher.py::_launch_process_in_container).
-    # A wrong-but-plausible integer here would have a destructive effect on
+    # with KILL_ON_JOB_CLOSE (see process.py's run_under_job). A
+    # wrong-but-plausible integer here would have a destructive effect on
     # an unrelated process, so it is sanity-checked before use rather than
     # trusted outright.
     pid = response["pid"]

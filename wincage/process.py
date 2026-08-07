@@ -197,8 +197,7 @@ def run_under_job(
     *process* must already be suspended (see launch_suspended) and not yet
     assigned to any job. memory_limit_mb, cpu_limit_percent,
     cpu_min_rate_percent, skip_cpu_limit, and skip_memory_limit are all
-    pre-resolved by the caller (launcher.py) from eras.yaml/the emulator
-    catalog; this function does not fetch them itself.
+    pre-resolved by the caller; this function does not fetch them itself.
 
     apply_limits controls whether this Job Object numerically enforces
     memory_limit_mb/cpu_limit_percent (the native, non-containerized path) or

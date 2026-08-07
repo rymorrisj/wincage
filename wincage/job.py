@@ -59,9 +59,8 @@ class WindowsJobObject:
         cpu_limit_percent: CPU hard cap as a percentage of all logical
             processors (1–100), applied at creation.
         cpu_min_rate_percent: CPU scheduling floor used as MinRate by
-            set_cpu_limit's MIN_MAX_RATE path; sourced from eras.yaml's
-            top-level cpu_min_rate_percent by the caller (see
-            launcher.py::launch_under_job_object), not read internally.
+            set_cpu_limit's MIN_MAX_RATE path; supplied by the caller as an
+            already-resolved value, not read internally.
         job_handle: Raw Win32 handle; ``None`` until ``create()`` is called.
         pid: PID of the emulator process added via ``add_process``.
     """
