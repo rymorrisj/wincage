@@ -1,0 +1,33 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build / packaging artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Compiled sandbox_host.exe (built by sandbox/build.sh via MSYS2 UCRT64 GCC)
+sandbox/sandbox_host.exe
+
+# Compiled sandbox_checker capability-probe binaries (built by src/build_tests.sh)
+sandbox_checker/src/test_qt_qpa.exe
+sandbox_checker/src/test_sdl2_d3d11.exe
+sandbox_checker/src/test_sdl2_opengl.exe
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor/OS cruft
+.vscode/
+.idea/
+.DS_Store

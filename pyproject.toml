@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wincage"
+version = "0.1.0"
+description = "Windows AppContainer + Job Object process sandbox, driven by a separate C++ helper process for crash-fault containment, plus a diagnostic capability-probe package."
+readme = "sandbox/README.md"
+# process.py (sandbox/) uses bare `str | None` / `SandboxConfig | None` union
+# syntax in parameter annotations with no `from __future__ import annotations`
+# guard, so those are evaluated eagerly at function-definition time and need
+# native PEP 604 union support. No other file under either package goes past
+# that: no match/case, no walrus, no other 3.11+/3.12+-only syntax found by
+# grep across sandbox/ and sandbox_checker/.
+requires-python = ">=3.10"
+# Every import across sandbox/ and sandbox_checker/ (excluding tests) is now
+# stdlib only (ctypes, asyncio, pathlib, typing, dataclasses, enum,
+# collections, json, os, subprocess, sys, threading, logging) or a
+# same-package relative import. The four `backend.core.logger` imports
+# (job.py, process.py, sandbox.py, sandbox_process.py) that previously made
+# this monorepo-only were swapped for stdlib `logging.getLogger(__name__)`
+# as part of this extraction, closing the extraction-readiness gap
+# sandbox/README.md's "Standalone-package intent" section tracked. Zero
+# non-stdlib runtime dependency remains.
+dependencies = []
+
+# This directory is the wincage package root, flattened out of its original
+# location nested under peach_1up's backend/service/utils/platform/windows/.
+# It contains exactly the two packages that make up the extractable core:
+# sandbox/ (including win32_types.py and sandbox_process.py, both already
+# inside it) and sandbox_checker/. The Peach 1UP-specific adapter layer that
+# resolved eras.yaml/emulator-catalog/settings data before calling into
+# sandbox/ (app_container.py, process/launcher.py, see sandbox/README.md's
+# "Standalone-package intent" section) stays behind in peach_1up's backend/
+# tree, deliberately not copied here; this pyproject.toml packages only the
+# generic core.
+[tool.setuptools]
+packages = ["sandbox", "sandbox_checker"]

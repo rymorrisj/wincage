@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── Verify required tools ────────────────────────────────────────────────────
+
+if ! command -v sdl2-config &>/dev/null; then
+    echo "ERROR: sdl2-config not found."
+    echo "Install SDL2 from MSYS2 UCRT64:"
+    echo "  pacman -S mingw-w64-ucrt-x86_64-SDL2"
+    exit 1
+fi
+
+if ! command -v pkg-config &>/dev/null; then
+    echo "ERROR: pkg-config not found."
+    echo "Install pkg-config from MSYS2 UCRT64:"
+    echo "  pacman -S mingw-w64-ucrt-x86_64-pkg-config"
+    exit 1
+fi
+
+# ── SDL2 flags ───────────────────────────────────────────────────────────────
+# SDL_MAIN_HANDLED defined before SDL headers keeps the standard main() entry
+# point, so -lSDL2main (expects SDL_main) and -mwindows (expects WinMain) are
+# both removed — either would produce an undefined reference at link time.
+
+SDL_CFLAGS=$(sdl2-config --cflags | sed 's/-Dmain=SDL_main//g')
+SDL_LIBS=$(sdl2-config --libs | sed 's/-lSDL2main//g' | sed 's/-mwindows//g')
+
+# ── Qt (optional — skip test_qt_qpa if not available) ───────────────────────
+
+BUILD_QT=1
+if ! pkg-config --exists Qt5Widgets 2>/dev/null; then
+    echo "WARNING: Qt5Widgets not found via pkg-config — test_qt_qpa.exe will not be built."
+    echo "To enable: pacman -S mingw-w64-ucrt-x86_64-qt5-base"
+    BUILD_QT=0
+fi
+
+# ── Build ────────────────────────────────────────────────────────────────────
+
+echo "Building test_sdl2_d3d11.exe ..."
+g++ -std=c++20 -Wall -Wextra -O2 \
+    ${SDL_CFLAGS} \
+    "$SCRIPT_DIR/test_sdl2_d3d11.cpp" \
+    ${SDL_LIBS} -ld3d11 -ldxgi \
+    -o "$SCRIPT_DIR/test_sdl2_d3d11.exe"
+
+echo "Building test_sdl2_opengl.exe ..."
+g++ -std=c++20 -Wall -Wextra -O2 \
+    ${SDL_CFLAGS} \
+    "$SCRIPT_DIR/test_sdl2_opengl.cpp" \
+    ${SDL_LIBS} \
+    -o "$SCRIPT_DIR/test_sdl2_opengl.exe"
+
+if [[ "$BUILD_QT" -eq 1 ]]; then
+    QT_FLAGS=$(pkg-config --cflags --libs Qt5Widgets)
+    echo "Building test_qt_qpa.exe ..."
+    g++ -std=c++20 -Wall -Wextra -O2 \
+        $(pkg-config --cflags Qt5Widgets) \
+        "$SCRIPT_DIR/test_qt_qpa.cpp" \
+        $(pkg-config --libs Qt5Widgets) \
+        -o "$SCRIPT_DIR/test_qt_qpa.exe"
+else
+    echo "SKIP: test_qt_qpa.exe"
+fi
+
+echo ""
+echo "Done. Run from Python:"
+echo "  from backend.service.utils.platform.windows.sandbox_checker import run_checks"
+echo "  results = run_checks()"
