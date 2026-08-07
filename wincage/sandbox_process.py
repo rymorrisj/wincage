@@ -1,5 +1,5 @@
 """
-SandboxProcess — lightweight process handle returned by the launcher.
+SandboxProcess, lightweight process handle returned by the launcher.
 
 Wraps the Win32 handles from CreateProcessW and provides the interface
 expected by WindowsJobObject.add_process(), process_registry, and the
@@ -129,7 +129,7 @@ class SandboxProcess:
         """Resume the suspended main thread using the stored thread handle.
 
         Uses the thread handle from ``PROCESS_INFORMATION`` returned by
-        ``CreateProcessW`` — no thread snapshot required.  The thread
+        ``CreateProcessW``, no thread snapshot required.  The thread
         handle is closed immediately after the resume call.
 
         Raises:
@@ -158,5 +158,5 @@ class SandboxProcess:
         if self._process_handle:
             ctypes.windll.kernel32.CloseHandle(self._process_handle)
             self._process_handle = None
-            self.handle = None  # same OS handle value — prevent use-after-close
+            self.handle = None  # same OS handle value, prevent use-after-close
         self.sandbox_handle = None

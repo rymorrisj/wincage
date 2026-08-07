@@ -1,8 +1,8 @@
 """
 Suspended process launch and Job Object assignment for Peach 1UP.
 
-``launch_suspended`` starts an emulator process — natively via CreateProcessW
-or inside an AppContainer via the sandbox package — with its main thread
+``launch_suspended`` starts an emulator process, natively via CreateProcessW
+or inside an AppContainer via the sandbox package, with its main thread
 suspended. ``run_under_job`` then creates a Windows Job Object, optionally
 applies CPU/memory limits to it, assigns the suspended process, retries once
 with CREATE_BREAKAWAY_FROM_JOB if the first assignment hits
@@ -11,7 +11,7 @@ assignment), and resumes the process's main thread once assignment has
 succeeded and any limits are in force.
 
 Both functions take already-resolved numbers rather than reading eras.yaml,
-the emulator catalog, or settings themselves — launcher.py owns that
+the emulator catalog, or settings themselves, launcher.py owns that
 resolution (era/catalog lookups, job-name-prefix convention) and calls these
 as its two delegation points.
 """
@@ -95,7 +95,7 @@ def _launch_native(
             f"Error code: {error_code}."
         )
 
-    # Retain hThread — it is needed for ResumeThread after Job Object
+    # Retain hThread, it is needed for ResumeThread after Job Object
     # assignment. resume() (or _close_handles() on teardown) closes it.
     return SandboxProcess(
         pid=pi.dwProcessId,
@@ -168,7 +168,7 @@ def launch_suspended(
     CreateProcessW (CREATE_SUSPENDED); a SandboxConfig launches inside an
     AppContainer via the sandbox package, which creates the process suspended
     and resumes it itself inside sandbox_host.exe after that process applies
-    its own Job Object limits — see run_under_job's apply_limits parameter for
+    its own Job Object limits, see run_under_job's apply_limits parameter for
     why the caller-side Job Object does not re-apply them for this path.
     """
     if sandbox_config is not None:
@@ -203,7 +203,7 @@ def run_under_job(
     memory_limit_mb/cpu_limit_percent (the native, non-containerized path) or
     only sets kill-on-close (container launches, where sandbox_host.exe's own
     Job Object already applied the limits before this process was ever
-    resumed — re-applying them here would be redundant and could disagree
+    resumed, re-applying them here would be redundant and could disagree
     with what was actually enforced if the two code paths ever drift). When
     apply_limits is True, skip_cpu_limit/skip_memory_limit independently gate
     each resource, matching a Job Object's own no-cap-if-skipped semantics.
@@ -214,7 +214,7 @@ def run_under_job(
     inside sandbox_host.exe, and carries no thread handle).
 
     If Job Object assignment fails, *process* is terminated and the launch is
-    aborted — there is no unsandboxed fallback.
+    aborted, there is no unsandboxed fallback.
     """
     container_enabled = sandbox_config is not None
 
@@ -238,7 +238,7 @@ def run_under_job(
             # still terminates the process.
             job_object.set_kill_on_close()
     except Exception as e:
-        # Terminate directly while suspended — TerminateProcess works on a
+        # Terminate directly while suspended, TerminateProcess works on a
         # suspended process, so there is no need to resume it first (which
         # would let this doomed process run uncapped, however briefly).
         cleanup_errors = []
@@ -320,7 +320,7 @@ def run_under_job(
                 f"Failed to assign breakaway process to job object: {exc3}"
             )
 
-    # Assignment succeeded and limits are in force — resume the suspended main
+    # Assignment succeeded and limits are in force, resume the suspended main
     # thread (native launches only; container launches were resumed inside
     # sandbox_host.exe and carry no thread handle). resume() closes hThread.
     # A resume failure here would leave the emulator hung, so it is fatal:

@@ -9,7 +9,7 @@ subsystem.
 import ctypes
 import ctypes.wintypes
 
-# Win32 CREATE_SUSPENDED flag — avoids a hard dependency on pywin32 at module import time.
+# Win32 CREATE_SUSPENDED flag, avoids a hard dependency on pywin32 at module import time.
 _CREATE_SUSPENDED = 0x00000004
 
 # CREATE_BREAKAWAY_FROM_JOB: child process escapes the parent's Job Object so
@@ -26,7 +26,7 @@ _JOB_OBJECT_CPU_RATE_CONTROL_ENABLE        = 0x1
 _JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP      = 0x4   # requires Windows 8.1+
 _JOB_OBJECT_CPU_RATE_CONTROL_MIN_MAX_RATE  = 0x10  # requires Windows 10 version 1607 (build 14393)+
 
-# GetExitCodeProcess sentinel — process has not yet exited.
+# GetExitCodeProcess sentinel, process has not yet exited.
 _STILL_ACTIVE = 259
 
 # ResumeThread failure sentinel. MSDN documents this as "(DWORD) -1"; with

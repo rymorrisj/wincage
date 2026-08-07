@@ -90,7 +90,7 @@ async def _async_run_one(
         name=name,
         status=CheckStatus.FAIL,
         message=(
-            f"test exited with code {exit_code} — "
+            f"test exited with code {exit_code}, "
             "AppContainer may be blocking a required API; "
             "disable sandbox for affected emulators"
         ),
@@ -110,7 +110,7 @@ def _run_one(
         return CheckResult(
             name=name,
             status=CheckStatus.SKIP,
-            message="not built — run build_tests.sh",
+            message="not built, run build_tests.sh",
             affects=affects,
         )
 
@@ -147,8 +147,8 @@ def run_checks(
     Returns:
         A list of CheckResult, one per entry in _CHECKS, in declaration order.
     """
-    # sandbox_host.exe must be built alongside sandbox/ before calling
-    # run_checks(), see ../sandbox/README.md.
+    # sandbox_host.exe must be built alongside wincage/ before calling
+    # run_checks(), see the repo root README.md.
     affects_map: Mapping[str, list[str]] = affects or {}
 
     results: list[CheckResult] = []

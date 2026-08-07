@@ -88,7 +88,7 @@ int main() {
     SDL_Quit();
 
     if (is_software) {
-        std::cout << "FAIL: D3D11 adapter is software/WARP — GPU not accessible in AppContainer\n";
+        std::cout << "FAIL: D3D11 adapter is software/WARP, GPU not accessible in AppContainer\n";
         return 1;
     }
 

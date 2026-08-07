@@ -22,16 +22,16 @@ fi
 # ── SDL2 flags ───────────────────────────────────────────────────────────────
 # SDL_MAIN_HANDLED defined before SDL headers keeps the standard main() entry
 # point, so -lSDL2main (expects SDL_main) and -mwindows (expects WinMain) are
-# both removed — either would produce an undefined reference at link time.
+# both removed, either would produce an undefined reference at link time.
 
 SDL_CFLAGS=$(sdl2-config --cflags | sed 's/-Dmain=SDL_main//g')
 SDL_LIBS=$(sdl2-config --libs | sed 's/-lSDL2main//g' | sed 's/-mwindows//g')
 
-# ── Qt (optional — skip test_qt_qpa if not available) ───────────────────────
+# ── Qt (optional, skip test_qt_qpa if not available) ───────────────────────
 
 BUILD_QT=1
 if ! pkg-config --exists Qt5Widgets 2>/dev/null; then
-    echo "WARNING: Qt5Widgets not found via pkg-config — test_qt_qpa.exe will not be built."
+    echo "WARNING: Qt5Widgets not found via pkg-config, test_qt_qpa.exe will not be built."
     echo "To enable: pacman -S mingw-w64-ucrt-x86_64-qt5-base"
     BUILD_QT=0
 fi
@@ -66,5 +66,5 @@ fi
 
 echo ""
 echo "Done. Run from Python:"
-echo "  from backend.service.utils.platform.windows.sandbox_checker import run_checks"
+echo "  from wincage.checker import run_checks"
 echo "  results = run_checks()"

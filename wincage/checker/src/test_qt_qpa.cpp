@@ -17,7 +17,7 @@ int main() {
     }
 
     QMessageBox box;
-    box.setText("Peach 1UP AppContainer check — closing automatically.");
+    box.setText("Peach 1UP AppContainer check, closing automatically.");
     QTimer::singleShot(1000, &box, &QMessageBox::accept);
     box.exec();
 

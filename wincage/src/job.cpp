@@ -18,7 +18,7 @@ HRESULT JobObject::create() {
     // BREAKAWAY_OK: allows child processes of the emulator to escape this job
     // by spawning with CREATE_BREAKAWAY_FROM_JOB.  This is NOT required for the
     // host's breakaway-retry logic (Python launcher.py or the C++ retry in
-    // main.cpp) — those retry paths govern sandbox_host.exe escaping ITS OWN
+    // main.cpp), those retry paths govern sandbox_host.exe escaping ITS OWN
     // parent job, not the emulator's children escaping this one.  BREAKAWAY_OK
     // here weakens job containment; candidate for removal if no emulator
     // sub-process is documented to require it.

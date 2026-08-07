@@ -14,13 +14,13 @@ dist/
 *.egg-info/
 .eggs/
 
-# Compiled sandbox_host.exe (built by sandbox/build.sh via MSYS2 UCRT64 GCC)
-sandbox/sandbox_host.exe
+# Compiled sandbox_host.exe (built by wincage/build.sh via MSYS2 UCRT64 GCC)
+wincage/sandbox_host.exe
 
-# Compiled sandbox_checker capability-probe binaries (built by src/build_tests.sh)
-sandbox_checker/src/test_qt_qpa.exe
-sandbox_checker/src/test_sdl2_d3d11.exe
-sandbox_checker/src/test_sdl2_opengl.exe
+# Compiled checker capability-probe binaries (built by checker/src/build_tests.sh)
+wincage/checker/src/test_qt_qpa.exe
+wincage/checker/src/test_sdl2_d3d11.exe
+wincage/checker/src/test_sdl2_opengl.exe
 
 # Test / coverage
 .pytest_cache/

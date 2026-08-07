@@ -97,7 +97,7 @@ class WindowsJobObject:
             )
 
         # CreateJobObjectW returns a handle to the EXISTING job object on a name
-        # collision (ERROR_ALREADY_EXISTS) instead of failing — the two unrelated
+        # collision (ERROR_ALREADY_EXISTS) instead of failing, the two unrelated
         # launches would silently share one kernel object, so tearing down one
         # would kill the other. Job names are PID-suffixed so this should never
         # fire in practice; treat it as a fatal error rather than proceeding.
@@ -108,7 +108,7 @@ class WindowsJobObject:
             self.job_handle = None
             raise RuntimeError(
                 f"Job Object '{self.name}' already exists (ERROR_ALREADY_EXISTS). "
-                "Refusing to share a Job Object handle between launches — aborting."
+                "Refusing to share a Job Object handle between launches, aborting."
             )
 
     def set_memory_limit(self, limit_mb: int) -> None:
@@ -289,7 +289,7 @@ class WindowsJobObject:
                         f" Error code: 5. retry_with_breakaway"
                     )
                 extra = (
-                    " The process is still inside an OS-managed job object — "
+                    " The process is still inside an OS-managed job object, "
                     "nested assignment failed. This should not occur on Windows 8+; "
                     "check for third-party job managers or restricted environments."
                     if already_in_job else ""
