@@ -249,6 +249,57 @@ path (see the public API reference above).
   Object memory limit is hit before the window appears. Pass
   `memory_limit_mb=None` for these processes; the Job Object is still
   created and CPU limits still apply.
+- **Raw device I/O is incompatible with AppContainer.** A process that needs
+  `DeviceIoControl` against a raw device handle will fail under AppContainer
+  confinement; the container's derived SID has no access to the device
+  namespace those calls go through. There is no configuration that grants it
+  back. Use the native Job-Object-only launch path (`launch_suspended()` /
+  `run_under_job()`, see Package layout above) as a fallback for these
+  processes; it gives resource limits without AppContainer confinement.
 - **`sandbox_host.exe` and the checker's probe binaries are build artifacts,
   not committed source.** Both must be compiled before the corresponding
   package is usable (see Install / build requirements above).
+
+## Security disclaimer
+
+Read this before using `wincage` as a security control rather than as a
+resource-limiting and tidiness measure.
+
+AppContainer confinement plus a Job Object meaningfully *reduces* what a
+launched process can reach and how much of the machine it can consume. It
+does not *eliminate* that risk. A process started through `launch()` still
+runs as the launching user's identity, still has whatever paths you named in
+`broker_files` granted to it, and still shares the desktop, window station,
+audio session, and GPU with everything else that user is running. That is
+deliberate, it is what makes graphics and audio keep working under
+confinement, and it is also exactly why the boundary is not airtight.
+
+**This package is not a complete sandbox against a genuinely malicious or
+untrusted binary.** It is built for confining code you have some reason to
+trust: your own executables, a plugin or worker whose failure mode you expect
+to be a bug rather than an attack, or a third-party tool you are limiting for
+robustness rather than defending against. It has not been designed or
+reviewed as a containment boundary for hostile code, and it makes no attempt
+to block the many ways a determined process can influence the session it runs
+inside.
+
+Known incompatibilities also exist, and they matter here because working
+around one usually means weakening confinement. The clearest example is raw
+device I/O via `DeviceIoControl`, which breaks under AppContainer; see
+**Known limitations** above for the detail and for the Job-Object-only
+fallback. Note that the fallback path drops AppContainer confinement
+entirely and keeps only the resource limits, so choosing it is a real
+reduction in isolation, not a workaround that preserves it.
+
+`wincage` is provided as-is, with no guarantee of total isolation. Running
+`wincage.checker.run_checks()` tells you whether an API stack survives
+confinement on a given machine; it does not tell you that confinement is
+sufficient for your threat model, and nothing in this package does.
+
+If you need a hard security boundary against code you actively distrust, use
+a virtual machine or dedicated hardware isolation. Do not rely on this
+package alone for that.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
