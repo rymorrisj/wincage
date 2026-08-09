@@ -70,7 +70,7 @@ class WindowsJobObject:
         name: str,
         memory_limit_mb: int,
         cpu_limit_percent: int,
-        cpu_min_rate_percent: int = 5,
+        cpu_min_rate_percent: int = 1,
     ):
         self.name = name
         self.memory_limit_mb = memory_limit_mb

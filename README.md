@@ -1,66 +1,34 @@
 # wincage
 
-Windows process sandboxing: launch an executable inside an AppContainer with a
-Job Object applying CPU and memory limits, plus a diagnostic package that
-probes whether a given machine's AppContainer actually allows the graphics/
-audio API stacks a sandboxed process will need.
+[![Windows Only](https://img.shields.io/badge/platform-Windows--10%20%2F%2011-blue.svg)](https://microsoft.com/windows)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Dependencies: Zero](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)]()
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Two packages ship together:
+[Peach 1UP](https://github.com/rymorrisj/peach_1up) runs a wide variety of third-party emulator software, and that software doesn't always behave. Hanging processes, memory leaks, and runaway CPU usage are common failure modes with binaries you didn't write and can't patch. wincage gives a host application a control layer over that: hard resource limits and process isolation. GPU and audio access stay intact, which those emulators need to work.
 
-- **`wincage`** the sandbox itself. `launch(config: SandboxConfig) ->
-  SandboxHandle` provisions a per-moniker AppContainer profile, grants it
-  access to whatever files the caller named in `broker_files`, starts the
-  target executable suspended inside that container under a Job Object with
-  CPU/memory limits, resumes it, and returns a handle with an event-callback
-  interface (`STARTED`, `EXITED`, `ERROR`, `CLEANED_UP`) for tracking it
-  asynchronously. `reset_container(moniker)` deletes a previously-provisioned
-  AppContainer profile.
-- **`wincage.checker`** a nested diagnostic subpackage. `run_checks()` runs
-  a handful of disposable test programs inside a throwaway AppContainer and
-  reports, per API stack, whether it actually works under confinement on this
-  system. It exists because AppContainer confinement can silently break a
-  GPU or audio path that works fine unconfined, and the failure mode is
-  usually "the sandboxed process behaves oddly" rather than a clear error —
-  `run_checks()` turns that into a yes/no answer *before* you rely on the
-  sandbox for something that needs one of those APIs. It ships nested inside
-  `wincage` rather than as a separate package because it exists to validate
-  `wincage` itself; it launches its probes through `wincage.launch()`.
+Windows process sandboxing. Runs an executable inside an AppContainer with a Job Object applying CPU/memory limits. Includes a diagnostic package that checks whether a machine's AppContainer allows the graphics/audio API stacks a sandboxed process needs.
 
-## Architecture: AppContainer + Job Object, via a separate native process
+| Package | Purpose |
+|---|---|
+| `wincage` | Core sandbox. `launch(config)` provisions a per-moniker AppContainer, grants `broker_files` access, starts the target suspended under a Job Object, resumes it, returns a `SandboxHandle` with event callbacks (`STARTED`/`EXITED`/`ERROR`/`CLEANED_UP`). `reset_container(moniker)` deletes a provisioned profile. |
+| `wincage.checker` | Nested diagnostic subpackage. `run_checks()` runs disposable probes inside a throwaway AppContainer and reports per-API-stack pass/fail. Launches its probes through `wincage.launch()` itself, so it ships nested rather than standalone. |
 
-AppContainer and Job Object solve different problems and both are needed:
+## Two isolation modes
 
-- **Job Objects** provide resource limits (CPU rate, memory cap,
-  kill-on-close). They add no security containment.
-- **AppContainer** confines a process to a derived SID without changing
-  identity, so it keeps the launching user's audio session, GPU adapter
-  selection, and desktop window station access working (all three fail
-  silently under a separate low-privilege account instead). It adds
-  filesystem, network, and inter-process isolation on top of a Job Object's
-  limits. This is *regular* AppContainer, not LPAC (Less Privileged
-  AppContainer): LPAC strips `ALL APPLICATION PACKAGES` from the token,
-  which breaks OpenGL ICD loading from DriverStore.
+- **AppContainer + Job Object** (`launch()`), the default. Full security isolation plus resource limits. Use this unless a target process needs raw device I/O.
+- **Job Object only** (`launch_suspended()` / `run_under_job()`), a fallback. Resource limits without AppContainer confinement. Use it for processes that call `DeviceIoControl` against a raw device handle, since that fails under AppContainer.
 
-The AppContainer/Job Object provisioning code itself
-(`CreateAppContainerProfile`, `SetNamedSecurityInfoW`/
-`TreeSetNamedSecurityInfoW` DACL grants, building a `SECURITY_CAPABILITIES`
-attribute list for `CreateProcessW`) runs in a separate native helper
-process, `sandbox_host.exe`, rather than in-process via `ctypes`. This is a
-**crash-fault containment boundary**, not a style preference: a hard fault in
-that code (a bad pointer into a `PSID`, a malformed attribute list passed to
-`CreateProcessW`, or any other native Win32 misuse) crashes whatever process
-it runs in. Windows 11 places essentially every process inside a job by
-default, so if this logic ran in-process in a host application, a crash
-there would take the host down, and a `KILL_ON_JOB_CLOSE` job containing the
-host would cascade-kill every other process it had launched along with it.
-Run as a separate child process instead, the same crash costs exactly one
-failed launch attempt. The price is a second binary that has to be built
-separately (MSYS2/GCC UCRT64, unrelated to a Python/Node host toolchain) and
-a stdin/stdout JSON protocol (`sandbox.py`'s `_build_stdin_payload`/response
-handling, `src/main.cpp`'s `JsonOut`/`json_parse.h`) standing in for a plain
-function call.
+## Architecture
 
-## Install / build requirements
+AppContainer and Job Object solve different problems, both needed:
+
+- **Job Object**, resource limits only (CPU rate, memory cap, kill-on-close). No security containment.
+- **AppContainer**, confines the process to a derived SID without changing identity. Audio session, GPU adapter, and window station access keep working. Under a separate low-privilege account, all three would fail silently instead. This is regular AppContainer, not LPAC. LPAC strips `ALL APPLICATION PACKAGES`, which breaks OpenGL ICD loading from DriverStore.
+
+Provisioning runs in a separate native process, `sandbox_host.exe`, not in-process via `ctypes`. This is a crash-fault boundary, not a style choice. A hard fault in native AppContainer/Job Object code crashes whatever process runs it. Windows 11 places nearly every process in a job by default, so an in-process crash would take the host down and cascade-kill everything else it launched via `KILL_ON_JOB_CLOSE`. As a separate child process, the same crash costs one failed launch instead.
+
+## Install / build
 
 Requires GCC from MSYS2 UCRT64:
 
@@ -71,33 +39,28 @@ pacman -S mingw-w64-ucrt-x86_64-gcc \
           mingw-w64-ucrt-x86_64-qt5-base   # optional, for the qt_qpa check
 ```
 
-From an MSYS2 UCRT64 terminal, build the sandbox host:
+Build the sandbox host from an MSYS2 UCRT64 terminal:
 
 ```sh
-bash wincage/build.sh
+bash wincage/build.sh                       # -> wincage/sandbox_host.exe
+OUT_NAME=myhost.exe bash wincage/build.sh   # custom output name
 ```
 
-This outputs `sandbox_host.exe` into `wincage/`, built with
-`-Wall -Wextra -Werror -fstack-protector-strong`. To use a different name:
-
-```sh
-OUT_NAME=myhost.exe bash wincage/build.sh
-```
-
-If you also want the checker's capability probes, build those separately:
+Build the checker's capability probes separately:
 
 ```sh
 bash wincage/checker/src/build_tests.sh
 ```
 
-This outputs `test_sdl2_d3d11.exe`, `test_sdl2_opengl.exe`, and (if Qt is
-available) `test_qt_qpa.exe` into `wincage/checker/src/`. Neither binary set
-is committed to the repository; both are required at runtime and must be
-built first.
+Outputs `test_sdl2_d3d11.exe`, `test_sdl2_opengl.exe`, and (if Qt is available) `test_qt_qpa.exe` into `wincage/checker/src/`. Neither binary set is committed. Both must be built before use.
 
-`wincage` itself has zero non-stdlib runtime dependencies (`ctypes`,
-`asyncio`, `pathlib`, `typing`, `dataclasses`, `enum`, `json`, `os`,
-`subprocess`, `threading`, `logging` only).
+Install the Python package:
+
+```sh
+pip install -e .
+```
+
+`wincage` itself has zero non-stdlib runtime dependencies (`ctypes`, `asyncio`, `pathlib`, `typing`, `dataclasses`, `enum`, `json`, `os`, `subprocess`, `threading`, `logging` only).
 
 ## Usage
 
@@ -122,184 +85,156 @@ handle = wincage.launch(config)   # synchronous; raises SandboxError on failure
 handle.on(wincage.SandboxEvent.EXITED, lambda p: print(f"exited: {p.exit_code}"))
 handle.on(wincage.SandboxEvent.ERROR,  lambda p: print(f"error: {p.error}"))
 
-# Terminate and wait for cleanup:
 await handle.terminate()  # resolves when CLEANED_UP fires
 
-# Delete a container profile later (e.g. after a corrupted session):
-wincage.reset_container("myapp.worker")
+wincage.reset_container("myapp.worker")  # delete a container profile later
 ```
 
-`launch()` returns a `SandboxHandle` after the child process starts.
-Callbacks fire from an asyncio task; call `launch()` from within a running
-event loop, or register callbacks on the returned handle at any point before
-the event fires.
+`launch()` returns a `SandboxHandle` once the child process starts. Callbacks fire from an asyncio task. Call `launch()` from within a running event loop, or register callbacks any time before the event fires.
 
-Run the capability checker before relying on the sandbox for something that
-needs a specific graphics/audio API:
+Run the capability checker before relying on the sandbox for a specific graphics/audio API:
 
 ```python
 from wincage.checker import run_checks, CheckStatus
 
-results = run_checks()
-
-for r in results:
-    print(f"{r.name}: {r.status.value}")
-    print(f"  {r.message}")
+for r in run_checks():
+    print(f"{r.name}: {r.status.value} - {r.message}")
     if r.status == CheckStatus.FAIL:
         print(f"  affects: {', '.join(r.affects)}")
 ```
 
-`run_checks()` never raises; it returns a `list[CheckResult]` regardless of
-outcome, and each check is `PASS`, `FAIL`, or `SKIP` (not built yet run
-`wincage/checker/src/build_tests.sh` first). `affects` is not a
-built-in list of anything pass your own `affects={"sdl2_d3d11": [...], ...}`
-mapping to `run_checks()` if you want each `CheckResult` to carry which of
-*your* components a failure impacts; names you don't supply default to `[]`.
-The checker only knows which API stack failed, not what depends on it.
+`run_checks()` never raises. It always returns `list[CheckResult]`, each `PASS`, `FAIL`, or `SKIP`. `SKIP` means probe binaries aren't built yet. `affects` is empty by default. Pass your own `affects={"sdl2_d3d11": [...], ...}` mapping if you want each result to carry which of your components a failure impacts.
 
 ### Runtime diagnostic scripts
 
-`wincage/scripts/` has two PowerShell scripts, `Test-AppContainerStatus.ps1`
-and `Test-JobObjectStatus.ps1`, for a different question than the checker
-answers: not "will sandboxing work on this machine" but "is *this specific,
-already-running* process actually confined the way I expect." Both take a
-`-Moniker` (the same string passed as `SandboxConfig.moniker`) and search
-running processes for a match; pass `-ProcessId` to check one process
-directly instead. See each script's comment-based help
-(`Get-Help .\Test-AppContainerStatus.ps1 -Full`) for the full detail on what
-each check can and cannot prove.
+`wincage/scripts/` answers a different question than the checker: not "will sandboxing work here" but "is this running process actually confined as expected." `Test-AppContainerStatus.ps1` and `Test-JobObjectStatus.ps1` both take `-Moniker`, matching `SandboxConfig.moniker`, or `-ProcessId` directly. See `Get-Help .\Test-AppContainerStatus.ps1 -Full` for what each check can and can't prove.
 
-## Public API reference
+**`Test-AppContainerStatus.ps1`**
+
+<details>
+<summary><b>Click to view example output</b></summary>
+
+```
+PS> .\Test-AppContainerStatus.ps1 -Moniker "Peach1UP.duckstation.shared"
+Searching running processes for moniker 'Peach1UP.duckstation.shared' (expected SID S-1-15-2-2176738053-2059683841-676532045-2718669675-2683758908-3894446449-788966096)...
+Found 1 process(es) confirmed under moniker 'Peach1UP.duckstation.shared' (skipped 120 inaccessible process(es)):
+  PID Name                           Path
+  --- ----                           ----
+26292 duckstation-qt-x64-ReleaseLTCG C:\Path\peach_1up\emulators\duckstat...
+
+PS> .\Test-AppContainerStatus.ps1 -Moniker "Peach1UP.xenia.shared"
+Searching running processes for moniker 'Peach1UP.xenia.shared' (expected SID S-1-15-2-...)...
+No running process is confined under moniker 'Peach1UP.xenia.shared' (skipped 121 inaccessible process(es)).
+If the target process runs under another user session, re-run this script elevated to include it in the search.
+```
+</details>
+
+**`Test-JobObjectStatus.ps1`**
+
+<details>
+<summary><b>Click to view example output</b></summary>
+
+```
+PS> .\Test-JobObjectStatus.ps1 -Moniker "Peach1UP.duckstation.shared"
+Searching running processes for moniker 'Peach1UP.duckstation.shared'...
+Found 1 process(es) confirmed under this moniker's AppContainer:
+  PID Name                           Path
+  --- ----                           ----
+26292 duckstation-qt-x64-ReleaseLTCG C:\Path\peach_1up\emulators\duckstat...
+Job Object status for PID 26292:
+  IsProcessInJob: True
+WARNING: This only confirms the process is in SOME Job Object, not specifically
+the sandbox package's own resource-limiting job. On Windows 11, nearly every
+process is pre-assigned to an OS-managed job by default, so True does not prove
+the app's CPU/memory limits are actually active. The container path's Job Object
+is created unnamed, so it cannot be looked up directly by moniker.
+For a definitive answer, check Sysinternals Process Explorer:
+  select the process > Properties > Job tab > view the actual configured limits.
+
+PS> .\Test-JobObjectStatus.ps1 -ProcessId 26292
+Checking Job Object status for PID 26292 (duckstation-qt-x64-ReleaseLTCG)...
+IsProcessInJob: True
+WARNING: [same caveat as above]
+```
+</details>
+
+## Public API
 
 ### `wincage`
 
 | Export | What it is |
 |---|---|
-| `launch(config)` | Provisions the AppContainer, starts the process, returns a `SandboxHandle`. See `sandbox.py` docstring. |
-| `reset_container(moniker)` | Deletes a previously-provisioned AppContainer profile. See `sandbox.py` docstring. |
-| `SandboxConfig` | Dataclass of launch parameters (moniker, exe_path, broker_files, resource limits, ...). See `sandbox_config.py`. |
-| `BrokerFile` | One file/directory grant entry for `SandboxConfig.broker_files`. See `sandbox_config.py`. |
-| `SandboxHandle` | Returned by `launch()`; exposes `.on(event, callback)` and `.terminate()`. See `sandbox.py`. |
-| `SandboxEvent` | Enum of handle events: `STARTED`, `EXITED`, `ERROR`, `CLEANED_UP`. See `sandbox_event.py`. |
-| `SandboxPayload` | Dataclass passed to event callbacks. See `sandbox_event.py`. |
-| `SandboxStage` | Enum identifying which stage of the launch/teardown pipeline an error or payload refers to. See `sandbox_event.py`. |
-| `SandboxError` | Raised by `launch()`/`reset_container()` on failure; carries `.stage` and `.suggestions`. See `sandbox_error.py`. |
-| `EXE_NAME` | Name of the host executable `launch()` spawns (default `"sandbox_host.exe"`); assignable before the first `launch()` call. See `sandbox.py`. |
-| `launch_suspended(exe, args, flags, ...)` | Starts a process suspended, natively via `CreateProcessW` or inside an AppContainer, returns a `SandboxProcess`. See `process.py` docstring. |
-| `run_under_job(executable_path, ..., process, job_name, ...)` | Creates a Job Object, assigns a suspended `SandboxProcess` to it, resumes it, returns `(SandboxProcess, WindowsJobObject)`. See `process.py` docstring. |
-| `SandboxProcess` | Process handle returned by `launch_suspended()`/`run_under_job()`; exposes `.poll()`, `.terminate()`, `.kill()`, `.wait()`, `.resume()`. See `sandbox_process.py`. |
-| `WindowsJobObject` | Win32 Job Object wrapper returned by `run_under_job()`; exposes `.set_memory_limit()`, `.set_cpu_limit()`, `.teardown()`, `.close()`. See `job.py`. |
+| `launch(config)` | Provisions the AppContainer, starts the process, returns a `SandboxHandle`. |
+| `reset_container(moniker)` | Deletes a provisioned AppContainer profile. |
+| `SandboxConfig` | Launch parameters: moniker, exe_path, broker_files, resource limits. |
+| `BrokerFile` | One file/directory grant entry for `SandboxConfig.broker_files`. |
+| `SandboxHandle` | Returned by `launch()`; `.on(event, callback)`, `.terminate()`. |
+| `SandboxEvent` | `STARTED`, `EXITED`, `ERROR`, `CLEANED_UP`. |
+| `SandboxPayload` | Passed to event callbacks. |
+| `SandboxStage` | Identifies which launch/teardown stage an error or payload refers to. |
+| `SandboxError` | Raised by `launch()`/`reset_container()`; carries `.stage` and `.suggestions`. |
+| `EXE_NAME` | Host executable name `launch()` spawns (default `"sandbox_host.exe"`); assignable before first call. |
+| `launch_suspended(exe, args, flags, ...)` | Starts a process suspended (native or AppContainer), returns a `SandboxProcess`. |
+| `run_under_job(executable_path, ..., process, job_name, ...)` | Assigns a suspended `SandboxProcess` to a new Job Object, resumes it, returns `(SandboxProcess, WindowsJobObject)`. |
+| `SandboxProcess` | Process handle from `launch_suspended()`/`run_under_job()`; `.poll()`, `.terminate()`, `.kill()`, `.wait()`, `.resume()`. |
+| `WindowsJobObject` | Job Object wrapper from `run_under_job()`; `.set_memory_limit()`, `.set_cpu_limit()`, `.teardown()`, `.close()`. |
 
 ### `wincage.checker`
 
 | Export | What it is |
 |---|---|
-| `run_checks(moniker_prefix=..., affects=...)` | Runs every capability probe, never raises. See `checker.py` docstring. |
-| `CheckResult` | Dataclass: `name`, `status`, `message`, `affects`. See `results.py`. |
-| `CheckStatus` | Enum: `PASS`, `FAIL`, `SKIP`. See `results.py`. |
-| `DEFAULT_MONIKER_PREFIX` | Default AppContainer moniker prefix used by `run_checks()` when `moniker_prefix` isn't passed. See `checker.py`. |
+| `run_checks(moniker_prefix=..., affects=...)` | Runs every capability probe, never raises. |
+| `CheckResult` | `name`, `status`, `message`, `affects`. |
+| `CheckStatus` | `PASS`, `FAIL`, `SKIP`. |
+| `DEFAULT_MONIKER_PREFIX` | Default AppContainer moniker prefix `run_checks()` uses when none is passed. |
 
 ## Package layout
 
 ```
 wincage/                  # sandbox core
-├── __init__.py           # public exports (table above)
+├── __init__.py           # public exports
 ├── sandbox.py            # launch() / reset_container(), talks to sandbox_host.exe
 ├── sandbox_config.py     # SandboxConfig, BrokerFile
 ├── sandbox_error.py      # SandboxError
 ├── sandbox_event.py      # SandboxEvent, SandboxStage, SandboxPayload
-├── job.py                # WindowsJobObject (native, non-container launch path)
+├── job.py                # WindowsJobObject (native launch path)
 ├── process.py            # launch_suspended() / run_under_job() (native launch path)
-├── sandbox_process.py    # SandboxProcess (native launch path's process handle)
+├── sandbox_process.py    # SandboxProcess handle (native launch path)
 ├── win32_types.py        # ctypes structures/constants, Win32 interop only
 ├── build.sh              # builds sandbox_host.exe
 ├── src/                  # sandbox_host.exe C++ source
-├── scripts/              # runtime diagnostic PowerShell scripts
+├── scripts/               # runtime diagnostic PowerShell scripts
 └── checker/               # nested diagnostic subpackage
-    ├── __init__.py       # public exports (table above)
+    ├── __init__.py       # public exports
     ├── checker.py        # run_checks()
     ├── results.py        # CheckResult, CheckStatus
     └── src/               # capability-probe test programs + build_tests.sh
 ```
 
-`job.py`, `process.py`, and `sandbox_process.py` implement a second, native
-(non-AppContainer) launch path built directly on a Job Object, for a host
-that wants Job Object resource limits without AppContainer confinement.
-`launch_suspended`, `run_under_job`, `SandboxProcess`, and `WindowsJobObject`
-are all re-exported from `wincage/__init__.py` alongside the AppContainer
-path (see the public API reference above).
-
 ## Known limitations
 
-- **Windows only.** Both the native helper process and the Python wrapper's
-  `ctypes.windll` calls require Win32 AppContainer and Job Object APIs; the
-  package will fail to import on non-Windows hosts.
-- **DACL grants are permanent on the path.** A `BrokerFile` with
-  `mode="grant"` or `mode="secure"` modifies the filesystem ACL and does not
-  revert on process exit; `grant` additionally propagates its ACE across the
-  existing tree under `path`. Broker only what the sandboxed process
-  requires, and prefer `secure` or `inherit` over `grant` when a single file
-  is enough.
-- **Container profiles are never deleted automatically.** A profile
-  provisioned for a moniker persists across launches and reboots by design.
-  Call `reset_container()` to remove one; per-moniker ACEs already granted to
-  a deleted profile's SID are not cleaned up.
-- **Qt's platform plugin fails under a memory cap.** Processes using the Qt
-  platform plugin allocate a large heap at startup and abort if the Job
-  Object memory limit is hit before the window appears. Pass
-  `memory_limit_mb=None` for these processes; the Job Object is still
-  created and CPU limits still apply.
-- **Raw device I/O is incompatible with AppContainer.** A process that needs
-  `DeviceIoControl` against a raw device handle will fail under AppContainer
-  confinement; the container's derived SID has no access to the device
-  namespace those calls go through. There is no configuration that grants it
-  back. Use the native Job-Object-only launch path (`launch_suspended()` /
-  `run_under_job()`, see Package layout above) as a fallback for these
-  processes; it gives resource limits without AppContainer confinement.
-- **`sandbox_host.exe` and the checker's probe binaries are build artifacts,
-  not committed source.** Both must be compiled before the corresponding
-  package is usable (see Install / build requirements above).
+- **Windows only.** Both `sandbox_host.exe` and the Python wrapper's `ctypes.windll` calls require Win32 AppContainer/Job Object APIs. Import fails on non-Windows hosts.
+- **DACL grants persist on the path.** `mode="grant"`/`"secure"` modify the filesystem ACL and don't revert on exit. `grant` also propagates its ACE across the existing tree. Broker only what's needed. Prefer `secure`/`inherit` over `grant` for a single file.
+- **Container profiles are never auto-deleted.** A provisioned profile persists across launches and reboots by design. `reset_container()` removes one. ACEs already granted to a deleted profile's SID aren't cleaned up.
+- **Qt's platform plugin fails under a memory cap.** It allocates a large heap at startup and aborts if the Job Object limit hits before the window appears. Pass `memory_limit_mb=None` for these processes. CPU limits still apply.
+- **Raw device I/O is incompatible with AppContainer.** `DeviceIoControl` against a raw device handle fails under confinement. Nothing grants it back. Use `launch_suspended()`/`run_under_job()`, the native path, instead for these processes.
+- **`sandbox_host.exe` and the checker's probe binaries are build artifacts, not committed source.** Both must be compiled first (see Install / build above).
 
 ## Security disclaimer
 
-Read this before using `wincage` as a security control rather than as a
-resource-limiting and tidiness measure.
+Read this before relying on `wincage` as a security control rather than a resource-limiting measure.
 
-AppContainer confinement plus a Job Object meaningfully *reduces* what a
-launched process can reach and how much of the machine it can consume. It
-does not *eliminate* that risk. A process started through `launch()` still
-runs as the launching user's identity, still has whatever paths you named in
-`broker_files` granted to it, and still shares the desktop, window station,
-audio session, and GPU with everything else that user is running. That is
-deliberate, it is what makes graphics and audio keep working under
-confinement, and it is also exactly why the boundary is not airtight.
+- AppContainer plus a Job Object reduces what a launched process can reach. **It does not eliminate that risk.**
+- A process started through `launch()` still runs as the launching user's identity. It still has whatever `broker_files` paths you granted it. It still shares the desktop, window station, audio session, and GPU with everything else that user runs.
+- **This is not a complete sandbox against malicious or untrusted code.** It's built for code you already trust: your own executables, a plugin or worker whose failure mode is a bug rather than an attack, or a third-party tool you're limiting for robustness. It hasn't been designed or reviewed as a containment boundary for hostile code.
+- Working around raw device I/O incompatibility usually means weakening confinement. The Job-Object-only fallback drops AppContainer entirely and keeps only resource limits. See Known limitations.
+- `run_checks()` tells you whether an API stack survives confinement on a given machine. It does not tell you confinement is sufficient for your threat model.
+- For a hard security boundary against actively distrusted code, use a VM or dedicated hardware isolation instead.
 
-**This package is not a complete sandbox against a genuinely malicious or
-untrusted binary.** It is built for confining code you have some reason to
-trust: your own executables, a plugin or worker whose failure mode you expect
-to be a bug rather than an attack, or a third-party tool you are limiting for
-robustness rather than defending against. It has not been designed or
-reviewed as a containment boundary for hostile code, and it makes no attempt
-to block the many ways a determined process can influence the session it runs
-inside.
+## Contributing
 
-Known incompatibilities also exist, and they matter here because working
-around one usually means weakening confinement. The clearest example is raw
-device I/O via `DeviceIoControl`, which breaks under AppContainer; see
-**Known limitations** above for the detail and for the Job-Object-only
-fallback. Note that the fallback path drops AppContainer confinement
-entirely and keeps only the resource limits, so choosing it is a real
-reduction in isolation, not a workaround that preserves it.
-
-`wincage` is provided as-is, with no guarantee of total isolation. Running
-`wincage.checker.run_checks()` tells you whether an API stack survives
-confinement on a given machine; it does not tell you that confinement is
-sufficient for your threat model, and nothing in this package does.
-
-If you need a hard security boundary against code you actively distrust, use
-a virtual machine or dedicated hardware isolation. Do not rely on this
-package alone for that.
+Open an issue for bugs or platform-compatibility gaps. Changes to the AppContainer/Job Object provisioning code (`sandbox_host.exe`, `src/`) should include the reasoning behind any new native Win32 call, since a mistake there is a crash-fault-boundary concern, not just a bug.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE)
