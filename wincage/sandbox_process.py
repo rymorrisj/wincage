@@ -78,7 +78,19 @@ class SandboxProcess:
             )
             return None
         if exit_code.value == _STILL_ACTIVE:
-            return None
+            # 259 is ambiguous: GetExitCodeProcess reports it both while the
+            # process is still running and when it legitimately exited with
+            # real exit code 259. Disambiguate with a non-blocking wait on
+            # the handle itself.
+            _WAIT_TIMEOUT = 0x00000102
+            wait_result = ctypes.windll.kernel32.WaitForSingleObject(
+                self._process_handle, ctypes.wintypes.DWORD(0)
+            )
+            if wait_result != 0:
+                # Not WAIT_OBJECT_0 (still running, or the wait itself
+                # failed): don't risk a false exit report.
+                return None
+            # WAIT_OBJECT_0: handle is signaled, so 259 is the real exit code.
         self.returncode = exit_code.value
         self._close_handles()
         return self.returncode
@@ -87,7 +99,7 @@ class SandboxProcess:
         """Send a termination signal to the process."""
         if self._process_handle:
             ctypes.windll.kernel32.TerminateProcess(self._process_handle, 1)
-        elif self.sandbox_handle is not None:
+        if self.sandbox_handle is not None:
             asyncio.run(self.sandbox_handle.terminate())
 
     def kill(self) -> None:

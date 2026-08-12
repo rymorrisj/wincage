@@ -276,6 +276,34 @@ def run_under_job(
         _needs_breakaway_retry = True
 
     if _needs_breakaway_retry:
+        # Bound the wait on the first attempt's sandbox_host.exe stub so a
+        # stalled stub cannot leak a process/thread/Job-Object handle into
+        # the retry attempt; force-kill it if it hasn't exited in time.
+        if process.sandbox_handle is not None:
+            stub = process.sandbox_handle
+            try:
+                asyncio.run(asyncio.wait_for(stub.terminate(), timeout=5.0))
+            except asyncio.TimeoutError:
+                logger.error(
+                    "sandbox_host stub did not exit within timeout for pid=%s "
+                    "during breakaway retry teardown; force-killing", process.pid,
+                )
+                stub_proc = getattr(stub, "_proc", None)
+                if stub_proc is not None:
+                    try:
+                        stub_proc.kill()
+                    except Exception as exc_kill:
+                        logger.error(
+                            "force-kill of sandbox_host stub failed for pid=%s: %s",
+                            process.pid, exc_kill,
+                        )
+            except Exception as exc:
+                logger.error(
+                    "stub termination failed for pid=%s during breakaway retry teardown: %s",
+                    process.pid, exc,
+                )
+            finally:
+                process.sandbox_handle = None
         # Terminate the still-suspended process directly (see phase 1).
         try:
             process.kill()
