@@ -130,23 +130,26 @@ def _launch_in_container(
 
     sandbox_handle = _sandbox.launch(sandbox_config)
 
-    PROCESS_ALL_ACCESS = 0x001FFFFF
-    win32_handle = ctypes.windll.kernel32.OpenProcess(
-        PROCESS_ALL_ACCESS, False, sandbox_handle.pid
-    )
-    if not win32_handle:
-        error_code = ctypes.windll.kernel32.GetLastError()
+    # The host duplicates its own handle to the target across the process
+    # boundary and reports it here, instead of Python reopening the target
+    # by pid. This closes the pid-reuse race: the target is a deliberate
+    # crash boundary, and a bare pid could already refer to an unrelated
+    # process by the time Python looked it up.
+    if sandbox_handle.process_handle is None:
         try:
             asyncio.run(sandbox_handle.terminate())
         except Exception as te:
             logger.warning(
-                "Failed to terminate container pid %d during OpenProcess cleanup: %s",
+                "Failed to terminate container pid %d after missing "
+                "process_handle: %s",
                 sandbox_handle.pid, te,
             )
         raise RuntimeError(
-            f"OpenProcess failed for container pid {sandbox_handle.pid} "
-            f"(error {error_code}) after sandbox.launch() succeeded."
+            f"sandbox_host.exe did not report a process_handle for "
+            f"container pid {sandbox_handle.pid}. It may be an older build."
         )
+
+    win32_handle = sandbox_handle.process_handle
 
     return SandboxProcess(
         pid=sandbox_handle.pid,

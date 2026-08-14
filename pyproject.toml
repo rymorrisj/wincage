@@ -7,31 +7,15 @@ name = "wincage"
 version = "0.1.0"
 description = "Windows AppContainer + Job Object process sandbox, driven by a separate C++ helper process for crash-fault containment, plus a diagnostic capability-probe package."
 readme = "README.md"
-# process.py (wincage/) uses bare `str | None` / `SandboxConfig | None` union
-# syntax in parameter annotations with no `from __future__ import annotations`
-# guard, so those are evaluated eagerly at function-definition time and need
-# native PEP 604 union support. No other file under either package goes past
-# that: no match/case, no walrus, no other 3.11+/3.12+-only syntax found by
-# grep across wincage/ and wincage/checker/.
+# process.py uses bare `str | None` union syntax without `from __future__
+# import annotations`, which needs native PEP 604 support (3.10+).
 requires-python = ">=3.10"
-# Every import across wincage/ and wincage/checker/ (excluding tests) is now
-# stdlib only (ctypes, asyncio, pathlib, typing, dataclasses, enum,
-# collections, json, os, subprocess, sys, threading, logging) or a
-# same-package relative import. The four `backend.core.logger` imports
-# (job.py, process.py, sandbox.py, sandbox_process.py) that previously tied
-# this to a specific host application's logging setup were swapped for
-# stdlib `logging.getLogger(__name__)` as part of extracting this into its
-# own standalone package. Zero non-stdlib runtime dependency remains.
+# Every import across wincage/ and wincage/checker/ is stdlib-only or a
+# same-package relative import. Zero non-stdlib runtime dependency.
 dependencies = []
 
-# This directory is the wincage package root, flattened out of its original
-# location nested inside a larger application's backend tree. It contains
-# exactly the two packages that make up the extractable core: wincage/
-# (including win32_types.py and sandbox_process.py, both already inside it)
-# and wincage/checker/, its nested diagnostic subpackage. The
-# application-specific adapter layer that resolved that application's own
-# config/catalog/settings data before calling into wincage/ stays behind in
-# that application's own tree, deliberately not copied here; this
-# pyproject.toml packages only the generic core.
+# This directory is the wincage package root: wincage/ plus its nested
+# wincage.checker/ subpackage. The application-specific adapter layer that
+# originally wrapped it stays behind in that application's own tree.
 [tool.setuptools]
 packages = ["wincage", "wincage.checker"]

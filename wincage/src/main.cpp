@@ -533,14 +533,51 @@ static int run_launch(const LaunchConfig& cfg) {
         return 1;
     }
 
+    // Hands Python a handle to this exact process instead of a pid it
+    // would have to reopen later. The target is a deliberate crash
+    // boundary, so a bare pid can be reused by an unrelated process in
+    // the window before Python opens it. A duplicated handle has no such
+    // window. It is a direct reference to this process object, not a
+    // lookup by an identifier Windows can recycle.
+    //
+    // Access is scoped to what SandboxProcess and WindowsJobObject
+    // actually call on it: terminate, poll/wait, and job assignment.
+    HANDLE parent_for_dup = OpenProcess(PROCESS_DUP_HANDLE, FALSE, cfg.parent_pid);
+    if (!parent_for_dup) {
+        std::string err = "OpenProcess(parent, PROCESS_DUP_HANDLE) failed ("
+            + hex32(GetLastError()) + ")";
+        TerminateProcess(pi.hProcess, 0);
+        CloseHandle(pi.hProcess);
+        emit_error("PROCESS_CREATE", err);
+        return 1;
+    }
+
+    HANDLE dup_target_handle = nullptr;
+    BOOL dup_ok = DuplicateHandle(
+        GetCurrentProcess(), pi.hProcess,
+        parent_for_dup, &dup_target_handle,
+        PROCESS_TERMINATE | PROCESS_SET_QUOTA
+            | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+        FALSE, 0);
+    DWORD dup_error = GetLastError();
+    CloseHandle(parent_for_dup);
+    if (!dup_ok) {
+        std::string err = "DuplicateHandle to parent failed (" + hex32(dup_error) + ")";
+        TerminateProcess(pi.hProcess, 0);
+        CloseHandle(pi.hProcess);
+        emit_error("PROCESS_CREATE", err);
+        return 1;
+    }
+
     std::wstring evt_name_w = evt.name();
     std::string evt_name(evt_name_w.begin(), evt_name_w.end());
 
     std::cout << JsonOut()
-        .set("sid",        sid_to_string(container.sid()))
-        .set("pid",        static_cast<long long>(pi.dwProcessId))
-        .set("event_name", evt_name)
-        .set("stage",      std::string("started"))
+        .set("sid",            sid_to_string(container.sid()))
+        .set("pid",            static_cast<long long>(pi.dwProcessId))
+        .set("process_handle", static_cast<long long>(reinterpret_cast<INT_PTR>(dup_target_handle)))
+        .set("event_name",     evt_name)
+        .set("stage",          std::string("started"))
         .dump() << "\n";
     std::cout.flush();
 
@@ -599,11 +636,13 @@ static int run_launch(const LaunchConfig& cfg) {
     GetExitCodeProcess(pi.hProcess, &exit_code);
     CloseHandle(pi.hProcess);
 
-    if (watchdog_usable && wait_result == WAIT_OBJECT_0 + 1) {
-        // Parent died. The child is still running here, so exit_code above is
-        // STILL_ACTIVE; ~JobObject kills the child via
-        // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE on return.
-    }
+    // This comment is for documentation purposes only 
+    // Parent died. The child is still running here, so exit_code above is
+    // STILL_ACTIVE; ~JobObject kills the child via
+    // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE on return.
+    // if (watchdog_usable && wait_result == WAIT_OBJECT_0 + 1) {
+
+    // }
 
     if (done_event) CloseHandle(done_event);
 

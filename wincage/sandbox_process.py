@@ -105,8 +105,12 @@ class SandboxProcess:
     def wait(self, timeout_ms: int = 10_000) -> int:
         """Wait up to *timeout_ms* milliseconds for the process to exit.
 
-        Returns the exit code, or -1 if the process did not exit within the
-        timeout.  Closes OS handles on return regardless of outcome.
+        Returns the exit code, or -1 if the process is still running when
+        the timeout elapses.
+
+        Handles close only once the exit is confirmed. On a timeout the
+        process is still alive, so the handle stays open for a later
+        poll(), wait(), or terminate() call.
         Callers that need to guarantee termination should call kill() first.
         """
         _WAIT_TIMEOUT = 0x00000102
@@ -116,18 +120,16 @@ class SandboxProcess:
                 ctypes.wintypes.DWORD(timeout_ms),
             )
             if result == _WAIT_TIMEOUT:
-                self._close_handles()
-                self.returncode = -1
                 return -1
             exit_code = ctypes.wintypes.DWORD(0)
             ctypes.windll.kernel32.GetExitCodeProcess(
                 self._process_handle, ctypes.byref(exit_code)
             )
             self.returncode = exit_code.value
-        self._close_handles()
-        # Reaching here with returncode still None means no handle was ever
-        # open; fall back to the same -1 sentinel the timeout branch uses so
-        # the -> int annotation stays honest.
+            self._close_handles()
+            return self.returncode
+        # No handle was ever open; fall back to the same -1 sentinel the
+        # timeout branch uses so the -> int annotation stays honest.
         return self.returncode if self.returncode is not None else -1
 
     def resume(self) -> None:
