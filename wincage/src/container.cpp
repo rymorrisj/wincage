@@ -1,6 +1,7 @@
 #include "container.h"
 #include <sddl.h>
 #include <aclapi.h>
+#include <cwchar>
 #include <stdexcept>
 #include <vector>
 
@@ -38,6 +39,91 @@ bool has_full_inheritable_ace(PACL acl, PSID sid, DWORD access_mask) {
     return false;
 }
 
+// The container gets enough access to create and
+// draw its own window and receive its own input. It does not get hooks,
+// journal record/playback, switch desktop, clipboard, or screen capture
+// rights. Those reach every other process and window on the desktop, not
+// just this one, and would defeat the point of confining it.
+constexpr DWORD kDesktopAccessMask =
+    DESKTOP_CREATEWINDOW | DESKTOP_CREATEMENU | DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS;
+constexpr DWORD kWindowStationAccessMask =
+    WINSTA_ENUMDESKTOPS | WINSTA_READATTRIBUTES | WINSTA_ACCESSGLOBALATOMS;
+
+// An ADS on path itself, so no separate storage location is needed and it
+// won't appear in a normal directory listing.
+const wchar_t* kGrantMarkerSuffix = L":wincage.pending";
+
+bool grant_marker_present(const std::wstring& path) {
+    return GetFileAttributesW((path + kGrantMarkerSuffix).c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+void write_grant_marker(const std::wstring& path) {
+    HANDLE h = CreateFileW((path + kGrantMarkerSuffix).c_str(), GENERIC_WRITE, 0,
+                            nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+}
+
+void clear_grant_marker(const std::wstring& path) {
+    DeleteFileW((path + kGrantMarkerSuffix).c_str());
+}
+
+DWORD apply_ace_to_node(const std::wstring& path, EXPLICIT_ACCESS_W& ea) {
+    PACL existing_acl = nullptr;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    DWORD err = GetNamedSecurityInfoW(
+        path.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+        nullptr, nullptr, &existing_acl, nullptr, &sd);
+    if (err != ERROR_SUCCESS) return err;
+
+    PACL new_acl = nullptr;
+    err = SetEntriesInAclW(1, &ea, existing_acl, &new_acl);
+    if (sd) LocalFree(sd);
+    if (err != ERROR_SUCCESS) return err;
+
+    err = SetNamedSecurityInfoW(
+        const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION, nullptr, nullptr, new_acl, nullptr);
+    if (new_acl) LocalFree(new_acl);
+    return err;
+}
+
+// TreeSetNamedSecurityInfoW can't be told to stop at a junction or
+// symlink, so it would propagate this ACE across it. Walk the tree
+// ourselves and skip reparse points instead.
+DWORD grant_tree_skip_reparse_points(const std::wstring& path, EXPLICIT_ACCESS_W& ea) {
+    DWORD err = apply_ace_to_node(path, ea);
+    if (err != ERROR_SUCCESS) return err;
+
+    WIN32_FIND_DATAW find_data = {};
+    HANDLE find_handle = FindFirstFileW((path + L"\\*").c_str(), &find_data);
+    if (find_handle == INVALID_HANDLE_VALUE) {
+        err = GetLastError();
+        // An empty directory reports ERROR_FILE_NOT_FOUND here, not success.
+        return (err == ERROR_FILE_NOT_FOUND) ? ERROR_SUCCESS : err;
+    }
+
+    do {
+        const wchar_t* name = find_data.cFileName;
+        if (wcscmp(name, L".") == 0 || wcscmp(name, L"..") == 0) continue;
+
+        // A junction/symlink here can point anywhere on disk, so crossing
+        // it would extend this grant beyond what the caller asked to broker.
+        if (find_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+
+        std::wstring child_path = path + L"\\" + name;
+        err = (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            ? grant_tree_skip_reparse_points(child_path, ea)
+            : apply_ace_to_node(child_path, ea);
+    } while (err == ERROR_SUCCESS && FindNextFileW(find_handle, &find_data));
+
+    if (err == ERROR_SUCCESS) {
+        DWORD last_err = GetLastError();
+        if (last_err != ERROR_NO_MORE_FILES) err = last_err;
+    }
+    FindClose(find_handle);
+    return err;
+}
+
 }  // namespace
 
 AppContainer::AppContainer(const std::wstring& moniker)
@@ -49,7 +135,7 @@ AppContainer::~AppContainer() {
         sid_ = nullptr;
     }
     // Intentionally never calls DeleteAppContainerProfile. Profile is stable
-    // across launches for the same emulator moniker.
+    // across launches for the same moniker.
 }
 
 ContainerResult AppContainer::provision() {
@@ -96,6 +182,12 @@ HRESULT AppContainer::grant_window_station() {
                 &dacl_present, &existing_acl, &dacl_defaulted))
             return HRESULT_FROM_WIN32(GetLastError());
 
+        if (!dacl_present) {
+            // A null DACL means everyone already has full access; replacing
+            // it with just our grant would lock everyone else out.
+            return E_UNEXPECTED;
+        }
+
         EXPLICIT_ACCESS_W ea = {};
         ea.grfAccessPermissions = mask;
         ea.grfAccessMode        = GRANT_ACCESS;
@@ -122,12 +214,12 @@ HRESULT AppContainer::grant_window_station() {
     // references, so closing them would tear down this process's own station.
     HWINSTA hwinsta = GetProcessWindowStation();
     if (!hwinsta) return HRESULT_FROM_WIN32(GetLastError());
-    HRESULT hr = grant_obj(hwinsta, 0x0000037F); // WINSTA_ALL_ACCESS
+    HRESULT hr = grant_obj(hwinsta, kWindowStationAccessMask);
     if (FAILED(hr)) return hr;
 
     HDESK hdesk = GetThreadDesktop(GetCurrentThreadId());
     if (!hdesk) return HRESULT_FROM_WIN32(GetLastError());
-    return grant_obj(hdesk, 0x000001FF); // DESKTOP_ALL_ACCESS
+    return grant_obj(hdesk, kDesktopAccessMask);
 }
 
 HRESULT AppContainer::secure_existing_file(const std::wstring& path, DWORD access_mask) {
@@ -191,16 +283,15 @@ HRESULT AppContainer::grant_directory(const std::wstring& path, DWORD access_mas
 
     // A prior launch may have already granted and propagated this exact ACE
     // (same SID, same access_mask, same inheritance flags) to path and
-    // everything under it.
+    // everything under it. Walking the tree again is expensive, so skip it
+    // once the root node shows the grant already took.
     //
-    // TreeSetNamedSecurityInfoW below walks and rewrites every
-    // file/directory ACL under path unconditionally. That's expensive on
-    // large trees, so skip it once the root node shows the grant already
-    // took.
-    if (has_full_inheritable_ace(existing_acl, sid_, access_mask)) {
-        if (sd) LocalFree(sd);
-        return S_OK;
-    }
+    // A marker from a prior interrupted walk means the root's ACE alone
+    // doesn't prove the tree is fully granted, so skip the fast path.
+    bool already_granted = !grant_marker_present(path)
+        && has_full_inheritable_ace(existing_acl, sid_, access_mask);
+    if (sd) LocalFree(sd);
+    if (already_granted) return S_OK;
 
     EXPLICIT_ACCESS_W ea = {};
     ea.grfAccessPermissions = access_mask;
@@ -210,34 +301,11 @@ HRESULT AppContainer::grant_directory(const std::wstring& path, DWORD access_mas
     ea.Trustee.TrusteeType  = TRUSTEE_IS_WELL_KNOWN_GROUP;
     ea.Trustee.ptstrName    = reinterpret_cast<LPWSTR>(sid_);
 
-    PACL new_acl = nullptr;
-    err = SetEntriesInAclW(1, &ea, existing_acl, &new_acl);
-    if (sd) LocalFree(sd);
-    if (err != ERROR_SUCCESS) return HRESULT_FROM_WIN32(err);
-
-    // A plain SetNamedSecurityInfoW only writes the DACL on this directory
-    // node. Windows applies OBJECT_INHERIT_ACE/CONTAINER_INHERIT_ACE to
-    // files created AFTER this call, but never retroactively to
-    // files/subfolders that already exist under path (saves or config
-    // dropped in before the AppContainer grant first ran, for example).
-    //
-    // TreeSetNamedSecurityInfoW instead:
-    // - Walks the existing tree and propagates the new inheritable ACE to
-    //   what's already there.
-    // - Uses TREE_SEC_INFO_SET, which preserves any other explicit ACEs
-    //   already present on child objects instead of clobbering them.
-    err = TreeSetNamedSecurityInfoW(
-        const_cast<LPWSTR>(path.c_str()),
-        SE_FILE_OBJECT,
-        DACL_SECURITY_INFORMATION,
-        nullptr, nullptr,
-        new_acl, nullptr,
-        TREE_SEC_INFO_SET,
-        nullptr,
-        ProgressInvokeNever,
-        nullptr
-    );
-    if (new_acl) LocalFree(new_acl);
+    // Written before the walk starts and cleared only on success, so a
+    // crash mid-walk leaves it behind for the check above to catch.
+    write_grant_marker(path);
+    err = grant_tree_skip_reparse_points(path, ea);
+    if (err == ERROR_SUCCESS) clear_grant_marker(path);
 
     return HRESULT_FROM_WIN32(err);
 }
