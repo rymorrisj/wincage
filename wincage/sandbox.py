@@ -103,6 +103,10 @@ def _drain_stderr(proc: subprocess.Popen) -> None:
 # limit.
 _MAX_SANE_PID = 0x7FFFFFFF
 
+# How long launch() waits for the host's handshake line on stdout before
+# killing it and giving up.
+_HANDSHAKE_TIMEOUT_SECONDS = 15.0
+
 
 def _validate(config: SandboxConfig) -> None:
     errors: list[str] = []
@@ -306,17 +310,15 @@ def _fire(
             )
 
 
-def launch(config: SandboxConfig) -> SandboxHandle:
-    _validate(config)
+def _spawn_host(exe_path: Path) -> subprocess.Popen:
+    """Start the host executable as a subprocess with piped stdio.
 
-    # ensure_ascii=False so non-ASCII path characters survive as raw UTF-8
-    # across the C++ boundary. json_parse.h copies non-escape bytes verbatim,
-    # so \uXXXX escapes (the ensure_ascii=True default) would corrupt them.
-    stdin_data = json.dumps(_build_stdin_payload(config), ensure_ascii=False).encode()
-
+    Returns the Popen handle, or raises SandboxError if the process
+    could not be spawned.
+    """
     try:
-        proc = subprocess.Popen(
-            [str(_exe())],
+        return subprocess.Popen(
+            [str(exe_path)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -328,151 +330,227 @@ def launch(config: SandboxConfig) -> SandboxHandle:
             suggestions=[f"Ensure {EXE_NAME} is built and accessible"],
         ) from exc
 
-    # From here on, any exception must still clean up proc. success stays
+
+def _write_handshake(proc: subprocess.Popen, config: SandboxConfig) -> None:
+    """Encode *config* as JSON and write it to the host's stdin.
+
+    Closes stdin after writing so the host sees EOF. Raises SandboxError
+    if the write fails.
+    """
+    # ensure_ascii=False so non-ASCII path characters survive as raw UTF-8
+    # across the C++ boundary. json_parse.h copies non-escape bytes verbatim,
+    # so \uXXXX escapes (the ensure_ascii=True default) would corrupt them.
+    stdin_data = json.dumps(_build_stdin_payload(config), ensure_ascii=False).encode()
+    try:
+        proc.stdin.write(stdin_data)
+        proc.stdin.flush()
+        proc.stdin.close()
+    except OSError as exc:
+        raise SandboxError(
+            message=f"Failed to write to {EXE_NAME} stdin: {exc}",
+            stage=SandboxStage.PROCESS_CREATE,
+            suggestions=[],
+        ) from exc
+
+
+def _read_handshake_response(proc: subprocess.Popen, timeout: float) -> dict:
+    """Read and parse the host's handshake line from stdout.
+
+    Kills *proc* if no line arrives within *timeout* seconds.
+
+    Raises SandboxError for:
+    - a timeout
+    - empty output
+    - invalid JSON
+
+    Returns the parsed response dict otherwise.
+    """
+    _timed_out = threading.Event()
+
+    def _kill_on_timeout() -> None:
+        _timed_out.set()
+        proc.kill()
+
+    _timer = threading.Timer(timeout, _kill_on_timeout)
+    _timer.start()
+    try:
+        stdout_line = proc.stdout.readline()
+    except OSError as exc:
+        raise SandboxError(
+            message=f"Communication with {EXE_NAME} failed: {exc}",
+            stage=SandboxStage.PROCESS_CREATE,
+            suggestions=[],
+        ) from exc
+    finally:
+        _timer.cancel()
+
+    if _timed_out.is_set():
+        raise SandboxError(
+            message=f"{EXE_NAME} did not respond within {timeout:.0f} seconds",
+            stage=SandboxStage.PROCESS_CREATE,
+            suggestions=["Check for AppContainer provisioning delays or permission issues"],
+        )
+
+    if not stdout_line:
+        raise SandboxError(
+            message=f"{EXE_NAME} produced no output",
+            stage=SandboxStage.PROCESS_CREATE,
+            suggestions=[f"Run {EXE_NAME} manually to debug startup"],
+        )
+
+    first_line = stdout_line.strip()
+    try:
+        return json.loads(first_line)
+    except json.JSONDecodeError as exc:
+        raise SandboxError(
+            message=f"Invalid JSON from {EXE_NAME}: {exc}",
+            stage=SandboxStage.PROCESS_CREATE,
+            suggestions=[],
+        ) from exc
+
+
+def _validate_handshake_response(response: dict) -> int:
+    """Validate the handshake *response* and extract the child's pid.
+
+    Checks for:
+    - required fields
+    - an embedded error stage
+    - a plausible pid range
+
+    Returns the validated pid, or raises SandboxError.
+    """
+    required = {"sid", "pid", "event_name", "stage"}
+    missing = required - response.keys()
+    if missing:
+        raise SandboxError(
+            message=f"{EXE_NAME} response missing fields: {missing}",
+            stage=SandboxStage.PROCESS_CREATE,
+            suggestions=[],
+        )
+
+    if response.get("stage") == "error":
+        # error_stage comes from the child's JSON and is not trusted.
+        # SandboxStage[...] raises KeyError on anything that is not an
+        # exact member name, which would escape as an unhandled
+        # exception instead of the SandboxError this function promises.
+        error_stage_raw = str(response.get("error_stage", "PROCESS_CREATE")).upper()
+        try:
+            error_stage = SandboxStage[error_stage_raw]
+        except KeyError:
+            error_stage = SandboxStage.PROCESS_CREATE
+        raise SandboxError(
+            message=response.get("error", f"Unknown error from {EXE_NAME}"),
+            stage=error_stage,
+            suggestions=response.get("suggestions", []),
+        )
+
+    # response["pid"] is child-controlled. It reaches
+    # OpenProcess(PROCESS_ALL_ACCESS, ...) plus Job Object assignment
+    # with KILL_ON_JOB_CLOSE (see process.py's run_under_job). A
+    # wrong-but-plausible integer would be destructive to an unrelated
+    # process.
+    #
+    # Range check does not close the PID-reuse race.
+    pid = response["pid"]
+    if isinstance(pid, bool) or not isinstance(pid, int) or not (0 < pid <= _MAX_SANE_PID):
+        raise SandboxError(
+            message=f"{EXE_NAME} reported an invalid pid: {pid!r}",
+            stage=SandboxStage.PROCESS_CREATE,
+            suggestions=[],
+        )
+
+    return pid
+
+
+def _build_sandbox_handle(
+    config: SandboxConfig,
+    response: dict,
+    pid: int,
+    proc: subprocess.Popen,
+) -> SandboxHandle:
+    """Build the SandboxHandle for a launched host.
+
+    Registers an ERROR listener that logs, so an ERROR event is never
+    silently dropped for lack of a callback.
+
+    Returns the new handle.
+    """
+    handle = SandboxHandle(
+        moniker=config.moniker,
+        container_sid=response["sid"],
+        pid=pid,
+        process_handle=response.get("process_handle"),
+        _callbacks=defaultdict(list),
+        _proc=proc,
+    )
+
+    # Without a listener, an ERROR payload (e.g. OpenEventW failing in
+    # the watcher thread) is dispatched to zero callbacks and
+    # effectively swallowed. Registered before the watcher thread
+    # starts so it's always present by the time _watch_event could
+    # fire ERROR.
+    def _log_sandbox_error(payload: SandboxPayload) -> None:
+        logger.error(
+            "Sandbox ERROR event: moniker=%s pid=%s stage=%s error=%s",
+            payload.moniker, payload.pid, payload.stage, payload.error,
+        )
+    handle.on(SandboxEvent.ERROR, _log_sandbox_error)
+
+    return handle
+
+
+def _start_background_threads(
+    handle: SandboxHandle,
+    proc: subprocess.Popen,
+    response: dict,
+) -> None:
+    """Fire STARTED and start the stderr drain and event watcher threads.
+
+    Both threads are daemon threads that run for the life of the
+    launched host.
+    """
+    started_payload = SandboxPayload(
+        event=SandboxEvent.STARTED,
+        moniker=handle.moniker,
+        pid=handle.pid,
+        exit_code=None,
+        error=None,
+        stage=None,
+    )
+    _fire(handle, SandboxEvent.STARTED, started_payload)
+
+    threading.Thread(target=_drain_stderr, args=(proc,), daemon=True).start()
+
+    loop = asyncio.new_event_loop()
+
+    def _run_watcher() -> None:
+        try:
+            loop.run_until_complete(
+                _watch_event(response["event_name"], handle, proc)
+            )
+        finally:
+            loop.close()
+
+    threading.Thread(target=_run_watcher, daemon=True).start()
+
+
+def launch(config: SandboxConfig) -> SandboxHandle:
+    _validate(config)
+
+    proc = _spawn_host(_exe())
+
+    # Any exception must still clean up proc. success stays
     # False until the handle is fully built and its background threads are
-    # running, so the finally block below covers every exception type,
-    # including KeyboardInterrupt, not just the OSError/JSONDecodeError
-    # cases each step already translates into a SandboxError.
+    # running
+    # 
+    # The `finally` block below covers every exception type for our case
     success = False
     try:
-        try:
-            proc.stdin.write(stdin_data)
-            proc.stdin.flush()
-            proc.stdin.close()
-        except OSError as exc:
-            raise SandboxError(
-                message=f"Failed to write to {EXE_NAME} stdin: {exc}",
-                stage=SandboxStage.PROCESS_CREATE,
-                suggestions=[],
-            ) from exc
-
-        _timed_out = threading.Event()
-
-        def _kill_on_timeout() -> None:
-            _timed_out.set()
-            proc.kill()
-
-        _timer = threading.Timer(15.0, _kill_on_timeout)
-        _timer.start()
-        try:
-            stdout_line = proc.stdout.readline()
-        except OSError as exc:
-            raise SandboxError(
-                message=f"Communication with {EXE_NAME} failed: {exc}",
-                stage=SandboxStage.PROCESS_CREATE,
-                suggestions=[],
-            ) from exc
-        finally:
-            _timer.cancel()
-
-        if _timed_out.is_set():
-            raise SandboxError(
-                message=f"{EXE_NAME} did not respond within 15 seconds",
-                stage=SandboxStage.PROCESS_CREATE,
-                suggestions=["Check for AppContainer provisioning delays or permission issues"],
-            )
-
-        if not stdout_line:
-            raise SandboxError(
-                message=f"{EXE_NAME} produced no output",
-                stage=SandboxStage.PROCESS_CREATE,
-                suggestions=[f"Run {EXE_NAME} manually to debug startup"],
-            )
-
-        first_line = stdout_line.strip()
-        try:
-            response = json.loads(first_line)
-        except json.JSONDecodeError as exc:
-            raise SandboxError(
-                message=f"Invalid JSON from {EXE_NAME}: {exc}",
-                stage=SandboxStage.PROCESS_CREATE,
-                suggestions=[],
-            ) from exc
-
-        required = {"sid", "pid", "event_name", "stage"}
-        missing = required - response.keys()
-        if missing:
-            raise SandboxError(
-                message=f"{EXE_NAME} response missing fields: {missing}",
-                stage=SandboxStage.PROCESS_CREATE,
-                suggestions=[],
-            )
-
-        if response.get("stage") == "error":
-            # error_stage comes from the child's JSON and is not trusted.
-            # SandboxStage[...] raises KeyError on anything that is not an
-            # exact member name, which would escape as an unhandled
-            # exception instead of the SandboxError this function promises.
-            error_stage_raw = str(response.get("error_stage", "PROCESS_CREATE")).upper()
-            try:
-                error_stage = SandboxStage[error_stage_raw]
-            except KeyError:
-                error_stage = SandboxStage.PROCESS_CREATE
-            raise SandboxError(
-                message=response.get("error", f"Unknown error from {EXE_NAME}"),
-                stage=error_stage,
-                suggestions=response.get("suggestions", []),
-            )
-
-        # response["pid"] is child-controlled. It reaches
-        # OpenProcess(PROCESS_ALL_ACCESS, ...) plus Job Object assignment
-        # with KILL_ON_JOB_CLOSE (see process.py's run_under_job). A
-        # wrong-but-plausible integer would be destructive to an unrelated
-        # process.
-        #
-        # Range check does not close the PID-reuse race.
-        pid = response["pid"]
-        if isinstance(pid, bool) or not isinstance(pid, int) or not (0 < pid <= _MAX_SANE_PID):
-            raise SandboxError(
-                message=f"{EXE_NAME} reported an invalid pid: {pid!r}",
-                stage=SandboxStage.PROCESS_CREATE,
-                suggestions=[],
-            )
-
-        handle = SandboxHandle(
-            moniker=config.moniker,
-            container_sid=response["sid"],
-            pid=pid,
-            process_handle=response.get("process_handle"),
-            _callbacks=defaultdict(list),
-            _proc=proc,
-        )
-
-        # Without a listener, an ERROR payload (e.g. OpenEventW failing in
-        # the watcher thread) is dispatched to zero callbacks and
-        # effectively swallowed. Registered before the watcher thread
-        # starts so it's always present by the time _watch_event could
-        # fire ERROR.
-        def _log_sandbox_error(payload: SandboxPayload) -> None:
-            logger.error(
-                "Sandbox ERROR event: moniker=%s pid=%s stage=%s error=%s",
-                payload.moniker, payload.pid, payload.stage, payload.error,
-            )
-        handle.on(SandboxEvent.ERROR, _log_sandbox_error)
-
-        started_payload = SandboxPayload(
-            event=SandboxEvent.STARTED,
-            moniker=config.moniker,
-            pid=pid,
-            exit_code=None,
-            error=None,
-            stage=None,
-        )
-        _fire(handle, SandboxEvent.STARTED, started_payload)
-
-        threading.Thread(target=_drain_stderr, args=(proc,), daemon=True).start()
-
-        loop = asyncio.new_event_loop()
-
-        def _run_watcher() -> None:
-            try:
-                loop.run_until_complete(
-                    _watch_event(response["event_name"], handle, proc)
-                )
-            finally:
-                loop.close()
-
-        threading.Thread(target=_run_watcher, daemon=True).start()
+        _write_handshake(proc, config)
+        response = _read_handshake_response(proc, _HANDSHAKE_TIMEOUT_SECONDS)
+        pid = _validate_handshake_response(response)
+        handle = _build_sandbox_handle(config, response, pid, proc)
+        _start_background_threads(handle, proc, response)
 
         success = True
         return handle
