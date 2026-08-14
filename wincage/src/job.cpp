@@ -2,6 +2,8 @@
 #include <string>
 
 JobObject::~JobObject() {
+    // Closing this triggers JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, which kills
+    // any process still in the job, e.g. the target if the parent died first.
     if (handle_) {
         CloseHandle(handle_);
         handle_ = nullptr;
@@ -15,19 +17,8 @@ HRESULT JobObject::create() {
     }
 
     // Children inherit job membership and are killed when the job closes.
-    //
-    // BREAKAWAY_OK lets descendants of the sandboxed process escape this job
-    // via CREATE_BREAKAWAY_FROM_JOB, so they run outside its CPU/memory caps
-    // and survive kill-on-close.
-    //
-    // It is NOT required by the breakaway retries in process.py or main.cpp:
-    // those govern sandbox_host.exe escaping its own parent job, not this
-    // job's members escaping it. Candidate for removal unless a child
-    // process is documented to need it.
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION eli = {};
-    eli.BasicLimitInformation.LimitFlags =
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
-        JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+    eli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
 
     if (!SetInformationJobObject(handle_,
             JobObjectExtendedLimitInformation,
@@ -83,17 +74,15 @@ HRESULT JobObject::apply_limits(const JobConfig& cfg) {
     if (!cfg.skip_memory_limit && cfg.memory_limit_bytes > 0) {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION eli = {};
         // This call replaces the whole extended-limit structure, so create()'s
-        // flags must be repeated here or they are lost. BREAKAWAY_OK carries
-        // the same caveat as in create().
+        // flags must be repeated here or they are lost.
         //
-        // PROCESS_MEMORY, not JOB_MEMORY, to match job.py's set_memory_limit()
+        // PROCESS_MEMORY to match job.py's set_memory_limit()
         // on the Job-Object-only launch path. memory_limit_mb caps each
         // process individually. JOB_MEMORY would cap the job's cumulative
-        // usage instead: a different meaning for the same config value.
+        // usage instead
         eli.BasicLimitInformation.LimitFlags =
             JOB_OBJECT_LIMIT_PROCESS_MEMORY |
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
-            JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         eli.ProcessMemoryLimit = cfg.memory_limit_bytes;
 
         if (!SetInformationJobObject(handle_,

@@ -82,10 +82,9 @@ static void emit_error(const std::string& stage,
 }
 
 static DWORD access_to_mask(const std::wstring& access) {
-    // 0x1201FF is FILE_GENERIC_READ|WRITE|EXECUTE plus FILE_DELETE_CHILD, i.e.
-    // wider than read+write. An unrecognised access string falls through to
-    // read-only rather than failing.
-    if (access == L"rw") return 0x001201FF;
+    // An unrecognised access string falls through to read-only rather than
+    // failing.
+    if (access == L"rw") return 0x0012019F; // FILE_GENERIC_READ | FILE_GENERIC_WRITE
     if (access == L"x")  return 0x000000A0; // FILE_TRAVERSE | FILE_READ_ATTRIBUTES
     return 0x00120089;                      // FILE_GENERIC_READ
 }
@@ -384,6 +383,7 @@ static int run_launch(const LaunchConfig& cfg) {
 
     SandboxEvent evt(cfg.moniker, cfg.parent_pid);
     if (evt.create() == EventResult::Failed) {
+        close_inherit_handles();
         emit_error("PROCESS_CREATE", "CreateEventW failed");
         return 1;
     }
@@ -569,8 +569,7 @@ static int run_launch(const LaunchConfig& cfg) {
         return 1;
     }
 
-    std::wstring evt_name_w = evt.name();
-    std::string evt_name(evt_name_w.begin(), evt_name_w.end());
+    std::string evt_name = to_utf8(evt.name());
 
     std::cout << JsonOut()
         .set("sid",            sid_to_string(container.sid()))
@@ -635,14 +634,6 @@ static int run_launch(const LaunchConfig& cfg) {
     DWORD exit_code = 0;
     GetExitCodeProcess(pi.hProcess, &exit_code);
     CloseHandle(pi.hProcess);
-
-    // This comment is for documentation purposes only 
-    // Parent died. The child is still running here, so exit_code above is
-    // STILL_ACTIVE; ~JobObject kills the child via
-    // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE on return.
-    // if (watchdog_usable && wait_result == WAIT_OBJECT_0 + 1) {
-
-    // }
 
     if (done_event) CloseHandle(done_event);
 
