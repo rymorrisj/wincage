@@ -1,15 +1,13 @@
 """
 Win32 ctypes structures and constants for wincage's Job Object layer.
 
-All structs map directly to the identically-named Win32 types.  Constants are
-prefixed with a single underscore to mark them as private to the package
+- Structs map directly to the identically-named Win32 types.
+- Constants are prefixed with a single underscore since they're private
+  to this package.
+- These values are normally available through pywin32; they're defined
+  here directly instead, to avoid that dependency.
 
-The below bit flags are set by Microsoft in the Windows header files for the OS.
-Since we are only useing a handful, and very specific ones, we will just set them here
-
-You can refer to the python package pywin32 which provide access to Windows APIs for pythog 
-
-Refs
+Refs:
 https://pypi.org/project/pywin32/
 https://learn.microsoft.com/en-us/windows/win32/ProcThread/processes-and-threads
 """
@@ -17,12 +15,11 @@ https://learn.microsoft.com/en-us/windows/win32/ProcThread/processes-and-threads
 import ctypes
 import ctypes.wintypes
 
-# Win32 CREATE_SUSPENDED flag, avoids a hard dependency on pywin32 at module import time.
+# Avoids a hard dependency on pywin32 at module import time.
 _CREATE_SUSPENDED = 0x00000004
 
-# CREATE_BREAKAWAY_FROM_JOB: child process escapes the parent's Job Object so
-# it can be cleanly assigned to our own.  Used when the launcher is already
-# inside a Windows Job Object (common on Windows 11).
+# Lets the child process escape the launcher's own Job Object so it can be
+# reassigned to ours; the launcher is often already in a job on Windows 11.
 _CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 
 # LimitFlags values used in JOBOBJECT_BASIC_LIMIT_INFORMATION.LimitFlags
@@ -37,12 +34,8 @@ _JOB_OBJECT_CPU_RATE_CONTROL_MIN_MAX_RATE  = 0x10  # requires Windows 10 version
 # GetExitCodeProcess sentinel, process has not yet exited.
 _STILL_ACTIVE = 259
 
-# ResumeThread failure sentinel. MSDN documents this as "(DWORD) -1"; with
-# ResumeThread's restype declared as the unsigned DWORD it actually returns
-# (see the kernel32 function signatures below), ctypes surfaces that bit
-# pattern as 0xFFFFFFFF, not Python's -1. Comparing against this constant
-# instead of -1 keeps that comparison correct now that the ctypes-default
-# signed-int restype is no longer silently reinterpreting it.
+# ResumeThread's documented failure value "(DWORD) -1" surfaces through
+# this unsigned-DWORD restype as 0xFFFFFFFF, not Python's -1; compare here.
 _RESUME_THREAD_FAILED = 0xFFFFFFFF
 
 # STARTUPINFO dwFlags / wShowWindow values for foreground placement hints.
@@ -62,11 +55,8 @@ class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
         ("MinimumWorkingSetSize", ctypes.c_size_t),
         ("MaximumWorkingSetSize", ctypes.c_size_t),
         ("ActiveProcessLimit", ctypes.wintypes.DWORD),
-        # Win32's ULONG_PTR Affinity is a pointer-sized bitmask value, not an
-        # actual pointer to a ULONG. c_size_t is the correct ctypes mapping
-        # for ULONG_PTR; POINTER(ULONG) previously declared it as a real
-        # pointer type, which is the wrong shape even though no code in this
-        # package reads or writes this field today.
+        # ULONG_PTR is a pointer-sized bitmask, not an actual pointer to a
+        # ULONG, so c_size_t is the correct mapping here, not POINTER(ULONG).
         ("Affinity", ctypes.c_size_t),
         ("PriorityClass", ctypes.wintypes.DWORD),
         ("SchedulingClass", ctypes.wintypes.DWORD),
@@ -96,12 +86,10 @@ class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
 
 
 class JOBOBJECT_CPU_RATE_CONTROL_INFORMATION(ctypes.Structure):
-    """Maps to the Win32 structure of the same name (hard-cap variant).
-
-    ``CpuRate`` occupies the first DWORD of the union field.  When
-    ``_JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP`` is set in ``ControlFlags``,
-    this field holds the per-scheduling-interval CPU budget expressed as
-    cycles per 10,000 across all logical processors (10,000 == 100%).
+    """Hard-cap variant only. CpuRate is the first DWORD of the union;
+    with ``_JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP`` set, it holds the
+    per-interval CPU budget in units of 1/10,000 across all logical
+    processors (10,000 == 100%).
     """
     _fields_ = [
         ("ControlFlags", ctypes.wintypes.DWORD),
@@ -135,7 +123,6 @@ class THREADENTRY32(ctypes.Structure):
 
 
 class STARTUPINFOW(ctypes.Structure):
-    """Maps to the Win32 STARTUPINFOW structure."""
     _fields_ = [
         ("cb",              ctypes.wintypes.DWORD),
         ("lpReserved",      ctypes.wintypes.LPWSTR),
@@ -159,7 +146,6 @@ class STARTUPINFOW(ctypes.Structure):
 
 
 class PROCESS_INFORMATION(ctypes.Structure):
-    """Maps to the Win32 PROCESS_INFORMATION structure."""
     _fields_ = [
         ("hProcess",    ctypes.wintypes.HANDLE),
         ("hThread",     ctypes.wintypes.HANDLE),
@@ -172,23 +158,18 @@ class PROCESS_INFORMATION(ctypes.Structure):
 # kernel32 function signatures
 # ---------------------------------------------------------------------------
 #
-# An undeclared ctypes foreign function defaults to argtypes=None (arguments
-# converted by ctypes' best guess from the Python type) and restype=c_int
-# (32-bit signed). HANDLE is pointer-sized; on Win64 a c_int restype
-# silently truncates a returned HANDLE to its low 32 bits. This has worked
-# by accident so far only because Windows guarantees kernel object handle
-# values fit in 32 bits (a documented WOW64-interop requirement), not
-# because the calls were actually declared correctly.
+# An undeclared ctypes function defaults to restype=c_int (32-bit signed).
+# HANDLE is pointer-sized, so on Win64 that would truncate a returned
+# HANDLE to its low 32 bits. This has only worked by luck: Windows
+# guarantees kernel handles fit in 32 bits (a WOW64-interop requirement),
+# not because these calls were declared correctly.
 #
-# ctypes.windll.kernel32 is a process-wide singleton (LibraryLoader caches
-# one WinDLL instance per name), and each named function is itself cached as
-# an attribute on first access. Declaring argtypes/restype here, once, at
-# import time therefore fixes every ctypes.windll.kernel32.X(...) call site
-# across this package (sandbox/job.py, sandbox/process.py,
-# sandbox/sandbox_process.py, sandbox/sandbox.py) without changing any of
-# those call sites, as long as this module has been imported first.
-# sandbox/sandbox.py does not otherwise depend on win32_types, so it imports
-# this module explicitly for that side effect.
+# ctypes.windll.kernel32 is a process-wide singleton and each function is
+# cached on first access, so declaring argtypes/restype here, once, fixes
+# every call site across the package (job.py, process.py,
+# sandbox_process.py, sandbox.py) as long as this module is imported
+# first. sandbox.py doesn't otherwise need win32_types; it imports it only
+# for that side effect.
 _kernel32 = ctypes.windll.kernel32
 _wt = ctypes.wintypes
 

@@ -1,12 +1,10 @@
 #include "event.h"
 #include <sstream>
 
-// Own PID is included so the event name is unique per sandbox_host.exe
-// launch, not just per (moniker, parent_pid) pair.
-//
-// Two concurrent launches of the same emulator by the same user share
-// both moniker and parent_pid. Without this suffix they would build the
-// identical event name and race on CreateEventW.
+// Own PID makes the event name unique per launch, not just per
+// (moniker, parent_pid): two concurrent launches of the same target
+// process share both, and without this suffix would race on CreateEventW
+// for one identical name.
 SandboxEvent::SandboxEvent(const std::wstring& moniker, DWORD pid) {
     std::wostringstream oss;
     oss << L"Local\\Sandbox_" << moniker << L"_" << pid << L"_" << GetCurrentProcessId();
@@ -31,15 +29,12 @@ EventResult SandboxEvent::create() {
     if (!handle_) return EventResult::Failed;
 
     // CreateEventW returns a handle to the EXISTING event on a name
-    // collision (ERROR_ALREADY_EXISTS) rather than failing. Two unrelated
-    // launches would then both hold a handle to ONE kernel event, so
-    // signaling it for one launch's exit would incorrectly unblock the
-    // other's Python watcher too.
+    // collision instead of failing, so two unrelated launches could end up
+    // sharing one kernel event and unblocking each other's Python watcher.
     //
-    // The per-launch PID suffix above should make this practically
-    // unreachable, but treat it as fatal rather than silently sharing the
-    // object. Mirrors job.py's ERROR_ALREADY_EXISTS handling for the
-    // equivalent job-naming case.
+    // The PID suffix above should make this unreachable in practice, but
+    // this is treated as fatal rather than silently shared. Mirrors
+    // job.py's ERROR_ALREADY_EXISTS handling for job names.
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(handle_);
         handle_ = nullptr;
