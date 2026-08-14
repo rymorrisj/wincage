@@ -20,9 +20,8 @@ if ! command -v pkg-config &>/dev/null; then
 fi
 
 # ── SDL2 flags ───────────────────────────────────────────────────────────────
-# SDL_MAIN_HANDLED defined before SDL headers keeps the standard main() entry
-# point, so -lSDL2main (expects SDL_main) and -mwindows (expects WinMain) are
-# both removed, either would produce an undefined reference at link time.
+# SDL_MAIN_HANDLED keeps the standard main() entry point, so -lSDL2main
+# and -mwindows (which expect SDL_main/WinMain) are stripped below.
 
 SDL_CFLAGS=$(sdl2-config --cflags | sed 's/-Dmain=SDL_main//g')
 SDL_LIBS=$(sdl2-config --libs | sed 's/-lSDL2main//g' | sed 's/-mwindows//g')

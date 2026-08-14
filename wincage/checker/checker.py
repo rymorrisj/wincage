@@ -9,18 +9,14 @@ from .results import CheckResult, CheckStatus
 
 _SRC = Path(__file__).parent / "src"
 
-# Default AppContainer moniker prefix. Each probe provisions a real, persistent
-# AppContainer profile named f"{moniker_prefix}.{check_name}", so an embedding
-# application that wants its probe profiles namespaced under its own identity
-# should pass moniker_prefix to run_checks() rather than accept this default.
+# Default AppContainer moniker prefix for probe profiles; override via
+# run_checks(moniker_prefix=...) to namespace them under your own app.
 DEFAULT_MONIKER_PREFIX: str = "SandboxChecker"
 
 # (name, exe_name, pass_message)
 #
-# What each probe verifies is a property of the capability, not of any
-# particular application. Which of the caller's programs a failure impacts is
-# the caller's knowledge, so it is supplied via run_checks(affects=...) and
-# deliberately not encoded here.
+# What a probe verifies is a property of the capability, not the caller,
+# so which programs a failure impacts comes from run_checks(affects=...).
 _CHECKS: list[tuple[str, str, str]] = [
     (
         "sdl2_d3d11",
@@ -65,15 +61,13 @@ async def _async_run_one(
 
     try:
         exit_code = await asyncio.to_thread(handle._proc.wait)
-        # sandbox_host.exe writes a final "exited" JSON line to stdout after
-        # the started-line sandbox.launch() already consumed; nothing else
-        # reads it, so drain it here rather than leaving it unread on the pipe.
+        # sandbox_host.exe writes a final "exited" JSON line after launch()
+        # already consumed the started-line; drain it so it's not left unread.
         if handle._proc.stdout is not None:
             await asyncio.to_thread(handle._proc.stdout.read)
     finally:
-        # Each probe provisions a real, persistent AppContainer profile
-        # (moniker_prefix.name). Without this, repeated check runs leave
-        # every prior run's profile behind with nothing to clean it up.
+        # Each probe provisions a real, persistent AppContainer profile;
+        # without this, repeated check runs leave every prior profile behind.
         try:
             reset_container(config.moniker)
         except SandboxError:
@@ -92,7 +86,7 @@ async def _async_run_one(
         message=(
             f"test exited with code {exit_code}, "
             "AppContainer may be blocking a required API; "
-            "disable sandbox for affected emulators"
+            "disable sandbox for affected components"
         ),
         affects=affects,
     )
@@ -130,19 +124,20 @@ def run_checks(
 ) -> list[CheckResult]:
     """Run every capability probe and return one CheckResult per probe.
 
-    Never raises: a probe that cannot launch, or that exits non-zero, comes back
-    as CheckStatus.FAIL, and a probe whose binary was never built comes back as
-    CheckStatus.SKIP.
+    Never raises: 
+        - a probe that cannot launch or that exits non-zero
+        - comes back as CheckStatus.FAIL
+        - a probe whose binary was never built comes back as CheckStatus.SKIP.
 
     Args:
         moniker_prefix: AppContainer moniker prefix for the probe profiles, which
-            are provisioned as f"{moniker_prefix}.{check_name}". These are real,
-            persistent per-user profiles, so pass a prefix that namespaces them
-            under the calling application.
+            are provisioned as f"{moniker_prefix}.{check_name}". These are persistent 
+            per-user profiles, so pass a prefix that namespaces them under the calling 
+            application.
         affects: Optional mapping of check name to the caller's own list of
             impacted components, copied verbatim onto the matching CheckResult.
             Names absent from the mapping get an empty list. The checker reports
-            which capability failed; deciding what that impacts is the caller's.
+            which capability failed
 
     Returns:
         A list of CheckResult, one per entry in _CHECKS, in declaration order.
