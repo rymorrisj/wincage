@@ -117,6 +117,9 @@ HRESULT AppContainer::grant_window_station() {
         return ok ? S_OK : HRESULT_FROM_WIN32(GetLastError());
     };
 
+    // Neither handle below is closed. GetProcessWindowStation and
+    // GetThreadDesktop return the caller's existing objects, not new
+    // references, so closing them would tear down this process's own station.
     HWINSTA hwinsta = GetProcessWindowStation();
     if (!hwinsta) return HRESULT_FROM_WIN32(GetLastError());
     HRESULT hr = grant_obj(hwinsta, 0x0000037F); // WINSTA_ALL_ACCESS
@@ -169,8 +172,8 @@ HRESULT AppContainer::secure_existing_file(const std::wstring& path, DWORD acces
 }
 
 HRESULT AppContainer::grant_directory(const std::wstring& path, DWORD access_mask) {
-    // TODO: Per-user ACEs accumulate on shared grant dirs with no cleanup on user
-    // deletion; revisit when PX-4 grant-scoping work lands.
+    // TODO: per-container ACEs accumulate on shared grant dirs and are never
+    // removed, including when the container profile is deleted.
     if (!sid_) return E_POINTER;
 
     PACL existing_acl = nullptr;
@@ -188,10 +191,12 @@ HRESULT AppContainer::grant_directory(const std::wstring& path, DWORD access_mas
 
     // A prior launch may have already granted and propagated this exact ACE
     // (same SID, same access_mask, same inheritance flags) to path and
-    // everything under it. TreeSetNamedSecurityInfoW below walks and
-    // rewrites every file/directory ACL under path unconditionally, which is
-    // expensive on large trees (e.g. the whole library/ tree); skip it once
-    // the root node shows the grant already took.
+    // everything under it.
+    //
+    // TreeSetNamedSecurityInfoW below walks and rewrites every
+    // file/directory ACL under path unconditionally. That's expensive on
+    // large trees, so skip it once the root node shows the grant already
+    // took.
     if (has_full_inheritable_ace(existing_acl, sid_, access_mask)) {
         if (sd) LocalFree(sd);
         return S_OK;
@@ -210,14 +215,17 @@ HRESULT AppContainer::grant_directory(const std::wstring& path, DWORD access_mas
     if (sd) LocalFree(sd);
     if (err != ERROR_SUCCESS) return HRESULT_FROM_WIN32(err);
 
-    // A plain SetNamedSecurityInfoW only writes the DACL on this directory node.
-    // Windows applies OBJECT_INHERIT_ACE/CONTAINER_INHERIT_ACE to files created
-    // AFTER this call, but never retroactively to files/subfolders that already
-    // exist under path (e.g. saves or config dropped in before the AppContainer
-    // grant first ran). TreeSetNamedSecurityInfoW walks the existing tree and
-    // propagates the new inheritable ACE to what's already there, while
-    // TREE_SEC_INFO_SET preserves any other explicit ACEs already present on
-    // child objects instead of clobbering them.
+    // A plain SetNamedSecurityInfoW only writes the DACL on this directory
+    // node. Windows applies OBJECT_INHERIT_ACE/CONTAINER_INHERIT_ACE to
+    // files created AFTER this call, but never retroactively to
+    // files/subfolders that already exist under path (saves or config
+    // dropped in before the AppContainer grant first ran, for example).
+    //
+    // TreeSetNamedSecurityInfoW instead:
+    // - Walks the existing tree and propagates the new inheritable ACE to
+    //   what's already there.
+    // - Uses TREE_SEC_INFO_SET, which preserves any other explicit ACEs
+    //   already present on child objects instead of clobbering them.
     err = TreeSetNamedSecurityInfoW(
         const_cast<LPWSTR>(path.c_str()),
         SE_FILE_OBJECT,

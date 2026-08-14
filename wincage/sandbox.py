@@ -61,11 +61,13 @@ def _build_stdin_payload(config: SandboxConfig) -> dict:
 def _kill_and_drain(proc: subprocess.Popen) -> str:
     """Ensure *proc* is terminated and its pipes drained/closed.
 
-    Called on every error branch in launch() after the child has spawned. A
-    child that already provisioned the AppContainer and resumed the emulator
-    before hitting a Python-side error (bad JSON, missing fields, a stalled
-    handshake) would otherwise keep running untracked, and its stderr pipe
-    would go unread, risking a fill-and-block if it ever writes enough to it.
+    Called on every error branch in launch() after the child has spawned.
+
+    A child may have already provisioned the AppContainer and resumed the
+    process before hitting a Python side error (bad JSON, missing
+    fields, a stalled handshake). Without this, it would keep running
+    untracked, and its stderr pipe would go unread, risking a
+    fill-and-block if it ever writes enough to it.
 
     Returns the decoded stderr text (possibly empty) for the caller to log.
     """
@@ -79,9 +81,10 @@ def _kill_and_drain(proc: subprocess.Popen) -> str:
     return stderr_bytes.decode(errors="replace").strip()
 
 
-# Reasonable upper bound for a Win32 PID: DWORD-sized but Windows never
-# actually assigns process IDs anywhere near the top of that range, so this
-# is a sanity check against a corrupted/malicious value, not a real limit.
+# Reasonable upper bound for a Win32 PID. DWORD-sized, but Windows never
+# actually assigns process IDs anywhere near the top of that range. This
+# is a sanity check against a corrupted/malicious value, not a real
+# limit.
 _MAX_SANE_PID = 0x7FFFFFFF
 
 
@@ -380,11 +383,10 @@ def launch(config: SandboxConfig) -> SandboxHandle:
         stderr_text = _kill_and_drain(proc)
         if stderr_text:
             logger.error("%s stderr: %s", EXE_NAME, stderr_text)
-        # error_stage is attacker/bug-controlled from the child's own JSON;
-        # SandboxStage[...] raises a bare KeyError on any value that isn't an
-        # exact member name, which would surface as an unhandled exception
-        # instead of the SandboxError this function promises. Fall back to
-        # PROCESS_CREATE for any unrecognized value instead.
+        # error_stage comes from the child's JSON and is not trusted.
+        # SandboxStage[...] raises KeyError on anything that is not an exact
+        # member name, which would escape as an unhandled exception instead
+        # of the SandboxError this function promises.
         error_stage_raw = str(response.get("error_stage", "PROCESS_CREATE")).upper()
         try:
             error_stage = SandboxStage[error_stage_raw]
@@ -396,12 +398,13 @@ def launch(config: SandboxConfig) -> SandboxHandle:
             suggestions=response.get("suggestions", []),
         )
 
-    # response["pid"] is child-controlled and is about to reach
-    # OpenProcess(PROCESS_ALL_ACCESS, ...) followed by Job Object assignment
-    # with KILL_ON_JOB_CLOSE (see process.py's run_under_job). A
-    # wrong-but-plausible integer here would have a destructive effect on
-    # an unrelated process, so it is sanity-checked before use rather than
-    # trusted outright.
+    # response["pid"] is child-controlled. It reaches
+    # OpenProcess(PROCESS_ALL_ACCESS, ...) plus Job Object assignment with
+    # KILL_ON_JOB_CLOSE (see process.py's run_under_job). A
+    # wrong-but-plausible integer would be destructive to an unrelated
+    # process.
+    #
+    # Range check does not close the PID-reuse race.
     pid = response["pid"]
     if isinstance(pid, bool) or not isinstance(pid, int) or not (0 < pid <= _MAX_SANE_PID):
         stderr_text = _kill_and_drain(proc)

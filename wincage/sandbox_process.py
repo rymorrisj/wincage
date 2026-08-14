@@ -1,9 +1,10 @@
 """
-SandboxProcess, lightweight process handle returned by the launcher.
+SandboxProcess, process handle returned by the launcher.
 
-Wraps the Win32 handles from CreateProcessW and provides the interface
-expected by WindowsJobObject.add_process(), process_registry, and the
-teardown paths in launch_under_job_object.
+Wraps the Win32 handles from CreateProcessW (native path) or OpenProcess
+(container path) and provides the interface expected by
+``WindowsJobObject.add_process()`` and the teardown paths in
+``process.run_under_job``.
 """
 
 from __future__ import annotations
@@ -23,11 +24,7 @@ _log = logging.getLogger(__name__)
 
 
 class SandboxProcess:
-    """Lightweight process handle returned by _launch_process.
-
-    Provides the interface expected by ``WindowsJobObject.add_process()``,
-    ``process_registry``, and the teardown paths in
-    ``launch_under_job_object``.
+    """Process handle returned by ``process.launch_suspended``.
 
     Attributes:
         pid: Process ID.
@@ -64,13 +61,12 @@ class SandboxProcess:
             self._process_handle, ctypes.byref(exit_code)
         )
         if not ok:
-            # GetExitCodeProcess's own BOOL return signals whether the DWORD
-            # out-param is meaningful at all. Ignoring it left exit_code at its
-            # pre-set _STILL_ACTIVE value on failure, so poll() reported "still
-            # running" even though the call told us nothing, a dead process
-            # could be reported alive indefinitely. Log and treat as unknown
-            # (None) rather than implicitly alive; do not set returncode or
-            # close handles, since we don't actually know the process exited.
+            # The BOOL return says whether the DWORD out-param is meaningful
+            # at all. On failure exit_code still holds the pre-set _STILL_ACTIVE.
+            #
+            # Report unknown (None) rather than implicitly alive. Leave
+            # returncode and the handles untouched as the process may or
+            # may not have exited.
             _log.error(
                 "GetExitCodeProcess failed for pid=%s (GetLastError=%s); "
                 "process exit state unknown.",
@@ -78,7 +74,7 @@ class SandboxProcess:
             )
             return None
         if exit_code.value == _STILL_ACTIVE:
-            # 259 is ambiguous: GetExitCodeProcess reports it both while the
+            # 259 is ambiguous. GetExitCodeProcess reports it both while the
             # process is still running and when it legitimately exited with
             # real exit code 259. Disambiguate with a non-blocking wait on
             # the handle itself.
@@ -129,12 +125,9 @@ class SandboxProcess:
             )
             self.returncode = exit_code.value
         self._close_handles()
-        # self.returncode is int | None; every path above that clears
-        # _process_handle also sets it to an int first, but that isn't
-        # structurally guaranteed, so fall back to the same -1 sentinel used
-        # by the timeout branch rather than letting the -> int annotation
-        # silently lie if a future caller reaches this with no handle and no
-        # recorded exit code.
+        # Reaching here with returncode still None means no handle was ever
+        # open; fall back to the same -1 sentinel the timeout branch uses so
+        # the -> int annotation stays honest.
         return self.returncode if self.returncode is not None else -1
 
     def resume(self) -> None:

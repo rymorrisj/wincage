@@ -1,9 +1,17 @@
 """
-Win32 ctypes structures and constants for wincage's Job Object isolation layer.
+Win32 ctypes structures and constants for wincage's Job Object layer.
 
 All structs map directly to the identically-named Win32 types.  Constants are
-prefixed with a single underscore to mark them as internal to the isolation
-subsystem.
+prefixed with a single underscore to mark them as private to the package
+
+The below bit flags are set by Microsoft in the Windows header files for the OS.
+Since we are only useing a handful, and very specific ones, we will just set them here
+
+You can refer to the python package pywin32 which provide access to Windows APIs for pythog 
+
+Refs
+https://pypi.org/project/pywin32/
+https://learn.microsoft.com/en-us/windows/win32/ProcThread/processes-and-threads
 """
 
 import ctypes

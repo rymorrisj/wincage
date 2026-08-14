@@ -14,14 +14,16 @@ HRESULT JobObject::create() {
         return HRESULT_FROM_WIN32(GetLastError());
     }
 
-    // Children inherit job membership and are killed when job closes.
-    // BREAKAWAY_OK: allows child processes of the emulator to escape this job
-    // by spawning with CREATE_BREAKAWAY_FROM_JOB.  This is NOT required for the
-    // host's breakaway-retry logic (wincage's own process.py, or the C++ retry
-    // in main.cpp), those retry paths govern sandbox_host.exe escaping ITS OWN
-    // parent job, not the emulator's children escaping this one.  BREAKAWAY_OK
-    // here weakens job containment; candidate for removal if no emulator
-    // sub-process is documented to require it.
+    // Children inherit job membership and are killed when the job closes.
+    //
+    // BREAKAWAY_OK lets descendants of the sandboxed process escape this job
+    // via CREATE_BREAKAWAY_FROM_JOB, so they run outside its CPU/memory caps
+    // and survive kill-on-close.
+    //
+    // It is NOT required by the breakaway retries in process.py or main.cpp:
+    // those govern sandbox_host.exe escaping its own parent job, not this
+    // job's members escaping it. Candidate for removal unless a child
+    // process is documented to need it.
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION eli = {};
     eli.BasicLimitInformation.LimitFlags =
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
@@ -40,13 +42,12 @@ HRESULT JobObject::apply_limits(const JobConfig& cfg) {
     if (!handle_) return E_HANDLE;
 
     if (!cfg.skip_cpu_limit) {
-        // Defense-in-depth: sandbox.py::_validate() already enforces this
-        // exact 1-100 range before the JSON payload reaches this process,
-        // but the WORD packing below has no bounds check of its own. An
-        // out-of-range value here (corrupted config, future caller bypassing
-        // sandbox.launch()) would silently produce a wrong CPU cap via
-        // truncation instead of a loud failure, so it is rejected explicitly
-        // rather than trusting the upstream validator alone.
+        // sandbox.py::_validate() already enforces this range, but the WORD
+        // packing below has no bounds check of its own: an out-of-range value
+        // reaching here would truncate into a wrong CPU cap instead of failing.
+        //
+        // _validate() also rejects cpu_min_rate > cpu_max_rate. That is not
+        // re-checked here.
         if (cfg.cpu_min_rate < 1 || cfg.cpu_min_rate > 100 ||
             cfg.cpu_max_rate < 1 || cfg.cpu_max_rate > 100) {
             return E_INVALIDARG;
@@ -55,8 +56,8 @@ HRESULT JobObject::apply_limits(const JobConfig& cfg) {
         JOBOBJECT_CPU_RATE_CONTROL_INFORMATION cpu = {};
 #ifdef JOB_OBJECT_CPU_RATE_CONTROL_MIN_MAX_RATE
         // MIN_MAX_RATE requires Windows 10+ SDK headers.
-        // Pack MinRate (low word) and MaxRate (high word) into the CpuRate field;
-        // MinGW UCRT64 headers expose only CpuRate in the union.
+        // Pack MinRate (low word) and MaxRate (high word) into the CpuRate
+        // field. MinGW UCRT64 headers expose only CpuRate in the union.
         cpu.ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE |
                            JOB_OBJECT_CPU_RATE_CONTROL_MIN_MAX_RATE;
         WORD min_w = static_cast<WORD>(cfg.cpu_min_rate * 100);
@@ -81,17 +82,14 @@ HRESULT JobObject::apply_limits(const JobConfig& cfg) {
 
     if (!cfg.skip_memory_limit && cfg.memory_limit_bytes > 0) {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION eli = {};
-        // BREAKAWAY_OK: see create() comment because the same caveat applies when
-        // memory limits are re-applied via apply_limits().
+        // This call replaces the whole extended-limit structure, so create()'s
+        // flags must be repeated here or they are lost. BREAKAWAY_OK carries
+        // the same caveat as in create().
         //
-        // PROCESS_MEMORY, not JOB_MEMORY: this must match job.py's
-        // set_memory_limit(), which caps memory_limit_mb per-process via
-        // JOB_OBJECT_LIMIT_PROCESS_MEMORY on the non-container Job-Object-only
-        // launch path. JOB_MEMORY caps the job's cumulative usage across every
-        // process it contains instead of any single one, a different meaning
-        // for the same config value; nothing here documented that divergence
-        // as intentional, so the container path is aligned to the same
-        // per-process semantics rather than left to drift.
+        // PROCESS_MEMORY, not JOB_MEMORY, to match job.py's set_memory_limit()
+        // on the Job-Object-only launch path. memory_limit_mb caps each
+        // process individually. JOB_MEMORY would cap the job's cumulative
+        // usage instead: a different meaning for the same config value.
         eli.BasicLimitInformation.LimitFlags =
             JOB_OBJECT_LIMIT_PROCESS_MEMORY |
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |

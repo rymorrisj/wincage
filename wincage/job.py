@@ -1,21 +1,9 @@
 """
-Windows Job Object wrapper for process isolation and resource limits.
+Windows Job Object wrapper for resource limits on the native launch path.
 
-Provides process isolation and resource limits for processes running
-natively on the Windows host.  Each launch gets its own named Job Object so
-multiple processes can run without interfering with each other.
-
-All processes are launched under the current user account via
-``CreateProcessW``.  If the Job Object cannot be created, the launch is
-aborted.  There is no unsandboxed fallback.
-
-Resource limits (memory cap, CPU hard cap, kill-on-close) are supplied by the
-caller as already-resolved values; this module does not read any
-configuration itself, and there is no per-profile override path of its own.
-
-Network isolation, if a target process needs it, is entirely the caller's
-responsibility; this module has no concept of network devices or per-target
-network policy.
+Each launch gets its own named Job Object so unrelated processes cannot
+interfere with each other's limits. Limits (memory cap, CPU cap,
+kill-on-close) are supplied by the caller as already-resolved values
 """
 
 import ctypes
@@ -39,30 +27,32 @@ logger = logging.getLogger(__name__)
 
 
 class WindowsJobObject:
-    """Windows Job Object wrapper for emulator process isolation.
+    """Windows Job Object wrapper for process resource limits.
 
-    Wraps a named Win32 Job Object with memory cap, CPU hard cap, and
-    kill-on-close semantics.  The expected call sequence is:
+    Wraps a named Win32 Job Object with memory cap, CPU cap, and
+    kill-on-close semantics. The expected call sequence is:
 
         job = WindowsJobObject(name, memory_limit_mb, cpu_limit_percent)
         job.create()
+        job.set_cpu_limit(...) / job.set_memory_limit(...)
         job.add_process(sandbox_process)
-        # ... emulator runs ...
         job.teardown()
 
-    ``run_under_job`` in sandbox/process.py handles this sequence and is
+    Limits must be set before add_process so the target can never run
+    uncapped. ``run_under_job`` in process.py handles this sequence and is
     the preferred entry point for callers outside this file.
 
     Attributes:
         name: Unique name for the Win32 Job Object.
-        memory_limit_mb: Per-process memory cap in MB, applied at creation.
-        cpu_limit_percent: CPU hard cap as a percentage of all logical
-            processors (1–100), applied at creation.
+        memory_limit_mb: Per-process memory cap in MB, applied by
+            ``set_memory_limit``, not by ``create``.
+        cpu_limit_percent: CPU cap as a percentage of all logical
+            processors (1 to 100), applied by ``set_cpu_limit``.
         cpu_min_rate_percent: CPU scheduling floor used as MinRate by
             set_cpu_limit's MIN_MAX_RATE path; supplied by the caller as an
             already-resolved value, not read internally.
         job_handle: Raw Win32 handle; ``None`` until ``create()`` is called.
-        pid: PID of the emulator process added via ``add_process``.
+        pid: PID of the process added via ``add_process``.
     """
 
     def __init__(
@@ -93,11 +83,10 @@ class WindowsJobObject:
                 f"Failed to create Job Object '{self.name}'. Error code: {error_code}"
             )
 
-        # CreateJobObjectW returns a handle to the EXISTING job object on a name
-        # collision (ERROR_ALREADY_EXISTS) instead of failing, the two unrelated
-        # launches would silently share one kernel object, so tearing down one
-        # would kill the other. Job names are PID-suffixed so this should never
-        # fire in practice; treat it as a fatal error rather than proceeding.
+        # CreateJobObjectW returns a handle to the EXISTING job object on a
+        # name collision (ERROR_ALREADY_EXISTS) instead of failing. Two
+        # unrelated launches would then silently share one kernel object,
+        # and tearing down either would kill the other.
         _ERROR_ALREADY_EXISTS = 183
         error_code = ctypes.windll.kernel32.GetLastError()
         if error_code == _ERROR_ALREADY_EXISTS:
@@ -254,7 +243,6 @@ class WindowsJobObject:
         if using_stored_handle:
             proc_handle = process.handle
         else:
-            # SAFETY: handle is closed by wait(); do not call add_process after kill/wait
             proc_handle = ctypes.windll.kernel32.OpenProcess(
                 0x0201,
                 False,
@@ -286,9 +274,9 @@ class WindowsJobObject:
                         f" Error code: 5. retry_with_breakaway"
                     )
                 extra = (
-                    " The process is still inside an OS-managed job object, "
+                    " The process is still inside an OS managed job object, "
                     "nested assignment failed. This should not occur on Windows 8+; "
-                    "check for third-party job managers or restricted environments."
+                    "check for third party job managers or restricted environments."
                     if already_in_job else ""
                 )
                 raise RuntimeError(
@@ -340,9 +328,9 @@ class WindowsJobObject:
     def close(self) -> None:
         """Close the job object handle.
 
-        Because KILL_ON_JOB_CLOSE is always set at creation (via set_memory_limit
-        or set_kill_on_close), closing the last handle to this job will terminate
-        all processes assigned to it.  Call teardown() instead when an explicit
+        Once set_memory_limit or set_kill_on_close has run, KILL_ON_JOB_CLOSE
+        is in force, so closing the last handle to this job terminates every
+        process assigned to it. Call teardown() instead when an explicit
         TerminateJobObject call is required before closing.
         """
         if self.job_handle:
@@ -357,11 +345,12 @@ class WindowsJobObject:
                 pass
             self.job_handle = None
 
-    # NAMING: handle_is_open checks only that the job handle is open and queryable —
-    # it does NOT check whether any processes are currently running in the job.
-    # A handle can be valid with zero live processes.  The name implies otherwise.
     def handle_is_open(self) -> bool:
-        """Check whether the job object handle is open and queryable."""
+        """Check whether the job object handle is open and queryable.
+
+        A handle can be open and queryable with
+        zero processes running in the job.
+        """
         if not self.job_handle:
             return False
 
