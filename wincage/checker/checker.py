@@ -124,10 +124,9 @@ def run_checks(
 ) -> list[CheckResult]:
     """Run every capability probe and return one CheckResult per probe.
 
-    Never raises: 
-        - a probe that cannot launch or that exits non-zero
-        - comes back as CheckStatus.FAIL
-        - a probe whose binary was never built comes back as CheckStatus.SKIP.
+    Never raises:
+        - A probe that cannot launch, or that exits non-zero, comes back as CheckStatus.FAIL.
+        - A probe whose binary was never built comes back as CheckStatus.SKIP.
 
     Args:
         moniker_prefix: AppContainer moniker prefix for the probe profiles, which
