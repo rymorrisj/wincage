@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Qt5 (mingw-w64-ucrt-x86_64-qt5-base) is intentionally not installed here:
+      # it's a large MSYS2 download that would meaningfully slow this workflow,
+      # and build_tests.sh already skips test_qt_qpa.exe gracefully when Qt5
+      # isn't available (see wincage/checker/src/build_tests.sh).
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-SDL2
+            mingw-w64-ucrt-x86_64-pkg-config
+
+      - name: Build sandbox_host.exe
+        shell: msys2 {0}
+        run: |
+          bash wincage/build.sh
+          test -f wincage/sandbox_host.exe
+
+      - name: Build checker probe binaries
+        shell: msys2 {0}
+        run: |
+          bash wincage/checker/src/build_tests.sh
+          test -f wincage/checker/src/test_sdl2_d3d11.exe
+          test -f wincage/checker/src/test_sdl2_opengl.exe
+
+      - name: Python syntax check
+        shell: bash
+        run: |
+          set -euo pipefail
+          find wincage wincage/checker -name '*.py' -not -path '*/__pycache__/*' -print0 \
+            | xargs -0 -n1 python -m py_compile

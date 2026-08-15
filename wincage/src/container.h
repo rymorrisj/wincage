@@ -21,6 +21,14 @@ public:
     HRESULT grant_window_station();
     HRESULT secure_existing_file(const std::wstring& path, DWORD access_mask);
     HRESULT grant_directory(const std::wstring& path, DWORD access_mask);
+
+    // Computes sid_ from moniker_ without provisioning a profile. Revoke has
+    // no reason to create a profile that doesn't exist just to compute the
+    // SID whose ACEs it's trying to remove.
+    HRESULT derive_sid();
+    HRESULT revoke_existing_file(const std::wstring& path);
+    HRESULT revoke_directory(const std::wstring& path);
+
     PSID sid() const { return sid_; }
 
     static HRESULT reset(const std::wstring& moniker);

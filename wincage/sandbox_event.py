@@ -13,6 +13,7 @@ class SandboxStage(Enum):
     CONFIG_VALIDATION = "config_validation"
     CONTAINER_PROVISION = "container_provision"
     DACL_GRANT = "dacl_grant"
+    DACL_REVOKE = "dacl_revoke"
     PROCESS_CREATE = "process_create"
     JOB_ASSIGN = "job_assign"
     WATCHDOG = "watchdog"

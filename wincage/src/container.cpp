@@ -313,3 +313,123 @@ HRESULT AppContainer::grant_directory(const std::wstring& path, DWORD access_mas
 HRESULT AppContainer::reset(const std::wstring& moniker) {
     return DeleteAppContainerProfile(moniker.c_str());
 }
+
+HRESULT AppContainer::derive_sid() {
+    return DeriveAppContainerSidFromAppContainerName(moniker_.c_str(), &sid_);
+}
+
+namespace {
+
+// True if acl carries any ACCESS_ALLOWED ACE for sid, regardless of mask or
+// inheritance flags. revoke_directory's fast path is the mirror image of
+// grant_directory's has_full_inheritable_ace: grant_directory treats "root
+// already has the full grant" as done, revoke_directory treats "root has no
+// grant left at all" as done.
+bool has_ace_for_sid(PACL acl, PSID sid) {
+    if (!acl || !sid) return false;
+
+    ACL_SIZE_INFORMATION size_info = {};
+    if (!GetAclInformation(acl, &size_info, sizeof(size_info), AclSizeInformation))
+        return false;
+
+    for (DWORD i = 0; i < size_info.AceCount; ++i) {
+        LPVOID ace_ptr = nullptr;
+        if (!GetAce(acl, i, &ace_ptr)) continue;
+
+        auto* header = static_cast<ACE_HEADER*>(ace_ptr);
+        if (header->AceType != ACCESS_ALLOWED_ACE_TYPE) continue;
+
+        auto* ace = reinterpret_cast<ACCESS_ALLOWED_ACE*>(ace_ptr);
+        PSID ace_sid = reinterpret_cast<PSID>(&ace->SidStart);
+        if (EqualSid(ace_sid, sid)) return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+HRESULT AppContainer::revoke_existing_file(const std::wstring& path) {
+    if (!sid_) return E_POINTER;
+
+    PACL existing_acl = nullptr;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+
+    DWORD err = GetNamedSecurityInfoW(
+        path.c_str(),
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION,
+        nullptr, nullptr,
+        &existing_acl, nullptr,
+        &sd
+    );
+    // A path that's already gone has nothing left to revoke.
+    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) return S_OK;
+    if (err != ERROR_SUCCESS) return HRESULT_FROM_WIN32(err);
+
+    EXPLICIT_ACCESS_W ea = {};
+    // grfAccessPermissions is left zero: SetEntriesInAclW ignores it when
+    // grfAccessMode is REVOKE_ACCESS, it removes every ACE for the trustee.
+    ea.grfAccessMode        = REVOKE_ACCESS;
+    ea.grfInheritance       = NO_INHERITANCE;
+    ea.Trustee.TrusteeForm  = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType  = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea.Trustee.ptstrName    = reinterpret_cast<LPWSTR>(sid_);
+
+    PACL new_acl = nullptr;
+    err = SetEntriesInAclW(1, &ea, existing_acl, &new_acl);
+    if (sd) LocalFree(sd);
+    if (err != ERROR_SUCCESS) return HRESULT_FROM_WIN32(err);
+
+    err = SetNamedSecurityInfoW(
+        const_cast<LPWSTR>(path.c_str()),
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION,
+        nullptr, nullptr,
+        new_acl, nullptr
+    );
+    if (new_acl) LocalFree(new_acl);
+
+    return HRESULT_FROM_WIN32(err);
+}
+
+HRESULT AppContainer::revoke_directory(const std::wstring& path) {
+    if (!sid_) return E_POINTER;
+
+    PACL existing_acl = nullptr;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+
+    DWORD err = GetNamedSecurityInfoW(
+        path.c_str(),
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION,
+        nullptr, nullptr,
+        &existing_acl, nullptr,
+        &sd
+    );
+    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) return S_OK;
+    if (err != ERROR_SUCCESS) return HRESULT_FROM_WIN32(err);
+
+    // Same crash-safety marker grant_directory uses, read the same way: a
+    // marker left behind by an interrupted walk (grant's or revoke's, it
+    // doesn't matter which) means the root's current ACE state doesn't prove
+    // the whole tree matches it, so the fast path below must not trust it.
+    bool already_revoked = !grant_marker_present(path)
+        && !has_ace_for_sid(existing_acl, sid_);
+    if (sd) LocalFree(sd);
+    if (already_revoked) return S_OK;
+
+    EXPLICIT_ACCESS_W ea = {};
+    ea.grfAccessMode        = REVOKE_ACCESS;
+    ea.grfInheritance       = NO_INHERITANCE;
+    ea.Trustee.TrusteeForm  = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType  = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea.Trustee.ptstrName    = reinterpret_cast<LPWSTR>(sid_);
+
+    // grant_tree_skip_reparse_points is generic over the ACE it applies;
+    // REVOKE_ACCESS above is what makes this a revoke, not a grant.
+    write_grant_marker(path);
+    err = grant_tree_skip_reparse_points(path, ea);
+    if (err == ERROR_SUCCESS) clear_grant_marker(path);
+
+    return HRESULT_FROM_WIN32(err);
+}

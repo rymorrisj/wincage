@@ -16,7 +16,7 @@ from typing import Callable
 # ctypes.windll.kernel32 singleton. See win32_types.py's "kernel32 function
 # signatures" section for why this must be imported before those calls run.
 from . import win32_types as _win32_types  # noqa: F401
-from .sandbox_config import SandboxConfig
+from .sandbox_config import BrokerFile, SandboxConfig
 from .sandbox_error import SandboxError
 from .sandbox_event import (
     SandboxEvent,
@@ -597,4 +597,85 @@ def reset_container(moniker: str) -> None:
             message=f"reset_container failed for '{moniker}': {stderr_text}",
             stage=SandboxStage.CONTAINER_PROVISION,
             suggestions=["Moniker may not exist; this is safe to ignore on first run"],
+        )
+
+
+def _parse_error_response(stdout_bytes: bytes) -> dict | None:
+    try:
+        return json.loads(stdout_bytes.decode(errors="replace").strip())
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+def revoke_grants(moniker: str, broker_files: list[BrokerFile]) -> None:
+    """Mirror of the DACL grants launch() applies for broker_files.
+
+    - mode="grant"/"secure" entries have their ACE removed. mode="inherit"
+      never touched a DACL, so those are skipped.
+    - Stateless: pass the same broker_files list you originally granted with.
+    - Not coupled to container lifecycle: safe regardless of whether a
+      process is still running under moniker; independent of
+      reset_container().
+    """
+    if not moniker:
+        raise SandboxError(
+            message="moniker must not be empty",
+            stage=SandboxStage.CONTAINER_PROVISION,
+            suggestions=[
+                "Pass the same moniker string that was used to grant "
+                "broker_files, i.e. SandboxConfig.moniker",
+            ],
+        )
+
+    stdin_data = json.dumps(
+        {
+            "broker_files": [
+                {"path": bf.path, "access": bf.access, "mode": bf.mode}
+                for bf in broker_files
+            ],
+        },
+        ensure_ascii=False,
+    ).encode()
+
+    try:
+        proc = subprocess.run(
+            [str(_exe()), "--revoke", moniker],
+            input=stdin_data,
+            capture_output=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        raise SandboxError(
+            message=f"revoke_grants timed out for moniker '{moniker}'",
+            stage=SandboxStage.DACL_REVOKE,
+            suggestions=["Check if a DACL revoke walk is stuck on a large tree"],
+        )
+    except OSError as exc:
+        raise SandboxError(
+            message=f"Failed to invoke {EXE_NAME} --revoke: {exc}",
+            stage=SandboxStage.PROCESS_CREATE,
+            suggestions=[],
+        ) from exc
+
+    if proc.returncode != 0:
+        response = _parse_error_response(proc.stdout)
+        if response is not None and response.get("stage") == "error":
+            # error_stage comes from the child's JSON and is not trusted; see
+            # the identical guard in _validate_handshake_response.
+            error_stage_raw = str(response.get("error_stage", "DACL_REVOKE")).upper()
+            try:
+                error_stage = SandboxStage[error_stage_raw]
+            except KeyError:
+                error_stage = SandboxStage.DACL_REVOKE
+            raise SandboxError(
+                message=response.get("error", f"revoke_grants failed for '{moniker}'"),
+                stage=error_stage,
+                suggestions=response.get("suggestions", []),
+            )
+
+        stderr_text = proc.stderr.decode(errors="replace").strip()
+        raise SandboxError(
+            message=f"revoke_grants failed for '{moniker}': {stderr_text or 'unknown error'}",
+            stage=SandboxStage.DACL_REVOKE,
+            suggestions=[],
         )

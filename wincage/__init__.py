@@ -1,5 +1,5 @@
 from . import sandbox as _sandbox_module
-from .sandbox import launch, reset_container, SandboxHandle
+from .sandbox import launch, reset_container, revoke_grants, SandboxHandle
 from .sandbox_config import BrokerFile, SandboxConfig
 from .sandbox_error import SandboxError
 from .sandbox_event import (
@@ -25,6 +25,7 @@ def __setattr__(name: str, value: object) -> None:
 __all__ = [
     "launch",
     "reset_container",
+    "revoke_grants",
     "EXE_NAME",
     "SandboxConfig",
     "SandboxHandle",

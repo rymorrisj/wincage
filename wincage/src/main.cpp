@@ -106,6 +106,20 @@ struct LaunchConfig {
     bool breakaway;
 };
 
+// Shared by parse_config (launch) and the --revoke stdin payload: both send
+// the same array-of-{path,access,mode} shape.
+static std::vector<BrokerFile> parse_broker_files(const JVal& j) {
+    std::vector<BrokerFile> out;
+    for (auto& f : j.at("broker_files").arr) {
+        BrokerFile bf;
+        bf.path   = to_wide(f.at("path").get<std::string>());
+        bf.access = to_wide(f.at("access").get<std::string>());
+        bf.mode   = to_wide(f.at("mode").get<std::string>());
+        out.push_back(std::move(bf));
+    }
+    return out;
+}
+
 static LaunchConfig parse_config(const JVal& j) {
     LaunchConfig cfg;
     cfg.moniker     = to_wide(j.at("moniker").get<std::string>());
@@ -118,13 +132,7 @@ static LaunchConfig parse_config(const JVal& j) {
         cfg.args.push_back(to_wide(a.get<std::string>()));
     }
 
-    for (auto& f : j.at("broker_files").arr) {
-        BrokerFile bf;
-        bf.path   = to_wide(f.at("path").get<std::string>());
-        bf.access = to_wide(f.at("access").get<std::string>());
-        bf.mode   = to_wide(f.at("mode").get<std::string>());
-        cfg.broker_files.push_back(std::move(bf));
-    }
+    cfg.broker_files = parse_broker_files(j);
 
     auto& jc = j.at("job_config");
     cfg.job_config.cpu_max_rate        = jc.at("cpu_max_rate").get<DWORD>();
@@ -296,6 +304,54 @@ static int run_reset(const std::string& moniker_utf8) {
                   << std::hex << hr << "\n";
         return 1;
     }
+    return 0;
+}
+
+// Mirror of run_launch's broker_files loop, but every entry removes an ACE
+// instead of adding one. Every entry is attempted in order and the first
+// failure aborts, same as run_launch: a silently-skipped revoke leaves an
+// ACE the caller believes is gone.
+static int run_revoke(const std::wstring& moniker,
+                      const std::vector<BrokerFile>& broker_files) {
+    AppContainer container(moniker);
+    HRESULT hr = container.derive_sid();
+    if (FAILED(hr)) {
+        emit_error("CONTAINER_PROVISION",
+                   "DeriveAppContainerSidFromAppContainerName failed ("
+                       + hex32(static_cast<DWORD>(hr)) + ")");
+        return 1;
+    }
+
+    for (const BrokerFile& bf : broker_files) {
+        // "inherit" mode never touched the DACL. grant_directory() is what
+        // grants a DACL ACE for "grant"; secure_existing_file() for "secure".
+        if (bf.mode == L"inherit") continue;
+
+        HRESULT entry_hr;
+        const char* what;
+        if (bf.mode == L"grant") {
+            entry_hr = container.revoke_directory(bf.path);
+            what = "revoke_directory";
+        } else if (bf.mode == L"secure") {
+            entry_hr = container.revoke_existing_file(bf.path);
+            what = "revoke_existing_file";
+        } else {
+            emit_error("DACL_REVOKE", "unrecognised broker_file mode '"
+                                          + to_utf8(bf.mode) + "' for '"
+                                          + to_utf8(bf.path) + "'");
+            return 1;
+        }
+
+        if (FAILED(entry_hr)) {
+            emit_error("DACL_REVOKE",
+                       std::string(what) + " failed for '" + to_utf8(bf.path)
+                           + "' (" + hex32(static_cast<DWORD>(entry_hr)) + ")");
+            return 1;
+        }
+    }
+
+    std::cout << JsonOut().set("stage", std::string("revoked")).dump() << "\n";
+    std::cout.flush();
     return 0;
 }
 
@@ -659,6 +715,30 @@ int main(int argc, char* argv[]) {
             return run_reset(argv[2]);
         } catch (const std::exception& ex) {
             std::cerr << "sandbox_host --reset: " << ex.what() << "\n";
+            return 1;
+        }
+    }
+
+    if (argc == 3 && std::string(argv[1]) == "--revoke") {
+        // Moniker arrives as argv, same as --reset. broker_files is a list
+        // though, so it arrives on stdin the same way launch's config does.
+        std::string moniker_utf8 = argv[2];
+        std::string input;
+        {
+            std::ostringstream oss;
+            oss << std::cin.rdbuf();
+            input = oss.str();
+        }
+        if (input.empty()) {
+            emit_error("CONFIG_VALIDATION", "No JSON payload received on stdin for --revoke");
+            return 1;
+        }
+        try {
+            JVal j = json_parse(input);
+            return run_revoke(to_wide(moniker_utf8), parse_broker_files(j));
+        } catch (const std::exception& ex) {
+            emit_error("CONFIG_VALIDATION",
+                       std::string("JSON parse error: ") + ex.what());
             return 1;
         }
     }

@@ -11,7 +11,7 @@ Windows process sandboxing. Runs an executable inside an AppContainer with a Job
 
 | Package | Purpose |
 |---|---|
-| `wincage` | Core sandbox. `launch(config)` provisions a per-moniker AppContainer, grants `broker_files` access, starts the target suspended under a Job Object, resumes it, returns a `SandboxHandle` with event callbacks (`STARTED`/`EXITED`/`ERROR`/`CLEANED_UP`). `reset_container(moniker)` deletes a provisioned profile. |
+| `wincage` | Core sandbox. `launch(config)` provisions a per-moniker AppContainer, grants `broker_files` access, starts the target suspended under a Job Object, resumes it, returns a `SandboxHandle` with event callbacks (`STARTED`/`EXITED`/`ERROR`/`CLEANED_UP`). `reset_container(moniker)` deletes a provisioned profile. `revoke_grants(moniker, broker_files)` reverses a prior grant. |
 | `wincage.checker` | Nested diagnostic subpackage. `run_checks()` runs disposable probes inside a throwaway AppContainer and reports per-API-stack pass/fail. Launches its probes through `wincage.launch()` itself, so it ships nested rather than standalone. |
 
 ## Two isolation modes
@@ -90,6 +90,22 @@ await handle.terminate()  # resolves when CLEANED_UP fires
 wincage.reset_container("myapp.worker")  # delete a container profile later
 ```
 
+`revoke_grants()` reverses a prior grant. It's an independent, stateless call:
+pass it the same `broker_files` list you originally granted with, whenever
+you decide the access is no longer needed. It doesn't wait for or care about
+`terminate()`/`reset_container()`, and it's fine to call while a process is
+still running under that moniker; whether that's safe to do is on the
+caller to judge, not wincage.
+
+```python
+wincage.revoke_grants(
+    "myapp.worker",
+    broker_files=[
+        wincage.BrokerFile(path="C:/data/jobs", access="rw", mode="grant"),
+    ],
+)
+```
+
 `launch()` returns a `SandboxHandle` once the child process starts. Callbacks fire from an asyncio task. Call `launch()` from within a running event loop, or register callbacks any time before the event fires.
 
 Run the capability checker before relying on the sandbox for a specific graphics/audio API:
@@ -166,6 +182,7 @@ WARNING: [same caveat as above]
 |---|---|
 | `launch(config)` | Provisions the AppContainer, starts the process, returns a `SandboxHandle`. |
 | `reset_container(moniker)` | Deletes a provisioned AppContainer profile. |
+| `revoke_grants(moniker, broker_files)` | Removes the container SID's DACL ACEs for `broker_files`, the mirror of what `launch()` grants. Stateless and independent of container/process lifecycle. |
 | `SandboxConfig` | Launch parameters: moniker, exe_path, broker_files, resource limits. |
 | `BrokerFile` | One file/directory grant entry for `SandboxConfig.broker_files`. |
 | `SandboxHandle` | Returned by `launch()`; `.on(event, callback)`, `.terminate()`. |
@@ -214,7 +231,7 @@ wincage/                  # sandbox core
 ## Known limitations
 
 - **Windows only.** Both `sandbox_host.exe` and the Python wrapper's `ctypes.windll` calls require Win32 AppContainer/Job Object APIs. Import fails on non-Windows hosts.
-- **DACL grants persist on the path.** `mode="grant"`/`"secure"` modify the filesystem ACL and don't revert on exit. `grant` also propagates its ACE across the existing tree. Broker only what's needed. Prefer `secure`/`inherit` over `grant` for a single file.
+- **DACL grants persist on the path.** `mode="grant"`/`"secure"` modify the filesystem ACL and don't revert on exit. `grant` also propagates its ACE across the existing tree. Broker only what's needed. Prefer `secure`/`inherit` over `grant` for a single file. Grants still don't auto-revert; call `revoke_grants(moniker, broker_files)` with the same list you granted with when you want the ACEs removed.
 - **Container profiles are never auto-deleted.** A provisioned profile persists across launches and reboots by design. `reset_container()` removes one. ACEs already granted to a deleted profile's SID aren't cleaned up.
 - **Qt's platform plugin fails under a memory cap.** It allocates a large heap at startup and aborts if the Job Object limit hits before the window appears. Pass `memory_limit_mb=None` for these processes. CPU limits still apply.
 - **Raw device I/O is incompatible with AppContainer.** `DeviceIoControl` against a raw device handle fails under confinement. Nothing grants it back. Use `launch_suspended()`/`run_under_job()`, the native path, instead for these processes.
