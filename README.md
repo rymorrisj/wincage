@@ -106,7 +106,7 @@ wincage.revoke_grants(
 )
 ```
 
-`launch()` returns a `SandboxHandle` once the child process starts. Callbacks fire from an asyncio task. Call `launch()` from within a running event loop, or register callbacks any time before the event fires.
+`launch()` returns a `SandboxHandle` once the child process starts. `STARTED` has already happened by the time you get the handle back, so registering a `STARTED` callback replays it immediately and synchronously. `EXITED`, `ERROR`, and `CLEANED_UP` fire later from the watcher's asyncio task. Call `launch()` from within a running event loop, or register callbacks any time before the event fires.
 
 Run the capability checker before relying on the sandbox for a specific graphics/audio API:
 

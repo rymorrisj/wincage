@@ -152,6 +152,10 @@ class SandboxHandle:
     # Set to True by _fire() once CLEANED_UP has been dispatched, so that
     # terminate() can detect the event already fired before it registered.
     _cleaned_up: bool = field(default=False, compare=False, hash=False)
+    # STARTED always happens before the caller can possibly have a handle to
+    # register a listener on, so it is stashed here instead of dispatched via
+    # _fire(), and replayed to each callback as it registers in on().
+    _started_payload: SandboxPayload | None = field(default=None, compare=False, hash=False)
 
     def on(
         self,
@@ -159,6 +163,8 @@ class SandboxHandle:
         callback: Callable[[SandboxPayload], None],
     ) -> None:
         self._callbacks[event].append(callback)
+        if event == SandboxEvent.STARTED and self._started_payload is not None:
+            callback(self._started_payload)
 
     async def terminate(self) -> None:
         loop = asyncio.get_event_loop()
@@ -484,6 +490,15 @@ def _build_sandbox_handle(
         _proc=proc,
     )
 
+    handle._started_payload = SandboxPayload(
+        event=SandboxEvent.STARTED,
+        moniker=handle.moniker,
+        pid=handle.pid,
+        exit_code=None,
+        error=None,
+        stage=None,
+    )
+
     # Without a listener, an ERROR payload (e.g. OpenEventW failing in
     # the watcher thread) is dispatched to zero callbacks and
     # effectively swallowed. Registered before the watcher thread
@@ -504,21 +519,11 @@ def _start_background_threads(
     proc: subprocess.Popen,
     response: dict,
 ) -> None:
-    """Fire STARTED and start the stderr drain and event watcher threads.
+    """Start the stderr drain and event watcher threads.
 
     Both threads are daemon threads that run for the life of the
     launched host.
     """
-    started_payload = SandboxPayload(
-        event=SandboxEvent.STARTED,
-        moniker=handle.moniker,
-        pid=handle.pid,
-        exit_code=None,
-        error=None,
-        stage=None,
-    )
-    _fire(handle, SandboxEvent.STARTED, started_payload)
-
     threading.Thread(target=_drain_stderr, args=(proc,), daemon=True).start()
 
     loop = asyncio.new_event_loop()
