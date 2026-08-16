@@ -86,12 +86,16 @@ static DWORD access_to_mask(const std::wstring& access) {
     // failing.
     if (access == L"rw") return 0x0012019F; // FILE_GENERIC_READ | FILE_GENERIC_WRITE
     if (access == L"x")  return 0x000000A0; // FILE_TRAVERSE | FILE_READ_ATTRIBUTES
+    // "r" alone can't enumerate a directory: FILE_GENERIC_READ carries
+    // FILE_LIST_DIRECTORY but not FILE_TRAVERSE, and Windows denies a
+    // CreateFile that requests both together if either is missing.
+    if (access == L"rx") return 0x001200A9; // FILE_GENERIC_READ | FILE_TRAVERSE
     return 0x00120089;                      // FILE_GENERIC_READ
 }
 
 struct BrokerFile {
     std::wstring path;
-    std::wstring access; // "r", "rw", or "x"
+    std::wstring access; // "r", "rw", "x", or "rx"
     std::wstring mode;   // "secure", "inherit", or "grant"
 };
 

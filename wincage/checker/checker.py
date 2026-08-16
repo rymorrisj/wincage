@@ -1,13 +1,98 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import ctypes.wintypes as _wt
 from collections.abc import Mapping
 from pathlib import Path
 
-from ..sandbox import SandboxConfig, SandboxError, launch, reset_container
+from ..sandbox import SandboxConfig, SandboxError, SandboxHandle, launch, reset_container
+from ..sandbox_config import BrokerFile
 from .results import CheckResult, CheckStatus
 
 _SRC = Path(__file__).parent / "src"
+
+# ---------------------------------------------------------------------------
+# AppContainer confinement verification
+# ---------------------------------------------------------------------------
+#
+# Same Win32 shape as ../scripts/Test-AppContainerStatus.ps1's
+# Get-ProcessAppContainerSidString: OpenProcessToken, then GetTokenInformation
+# with TokenAppContainerSid, probing for the required buffer size first.
+# Unlike that script, this doesn't need DeriveAppContainerSidFromAppContainerName
+# to compute the expected SID: SandboxHandle.container_sid already carries it,
+# derived by sandbox_host.exe itself during launch(). It also doesn't need its
+# own OpenProcess call: handle.process_handle already carries
+# PROCESS_QUERY_LIMITED_INFORMATION, which OpenProcessToken accepts directly
+# (see main.cpp's DuplicateHandle call).
+#
+# ctypes.windll.kernel32's argtypes/restype are set up by win32_types.py's
+# side effect import, already triggered above via `from ..sandbox import`.
+
+_TOKEN_QUERY = 0x0008
+_TOKEN_APP_CONTAINER_SID = 31
+
+_advapi32 = ctypes.windll.advapi32
+_advapi32.OpenProcessToken.argtypes = [_wt.HANDLE, _wt.DWORD, ctypes.POINTER(_wt.HANDLE)]
+_advapi32.OpenProcessToken.restype = _wt.BOOL
+_advapi32.GetTokenInformation.argtypes = [
+    _wt.HANDLE, ctypes.c_int, ctypes.c_void_p, _wt.DWORD, ctypes.POINTER(_wt.DWORD),
+]
+_advapi32.GetTokenInformation.restype = _wt.BOOL
+_advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p)]
+_advapi32.ConvertSidToStringSidW.restype = _wt.BOOL
+
+_kernel32 = ctypes.windll.kernel32
+
+
+def _verify_confinement(handle: SandboxHandle) -> str | None:
+    """Confirm the probe process's token AppContainer SID matches handle.container_sid.
+
+    Returns None once confirmed, otherwise a short description of what
+    could not be confirmed and why.
+    """
+    if handle.process_handle is None:
+        return "no process handle reported by the host"
+
+    token = _wt.HANDLE()
+    if not _advapi32.OpenProcessToken(handle.process_handle, _TOKEN_QUERY, ctypes.byref(token)):
+        return f"OpenProcessToken failed (error {_kernel32.GetLastError()})"
+
+    try:
+        required = _wt.DWORD(0)
+        _advapi32.GetTokenInformation(
+            token, _TOKEN_APP_CONTAINER_SID, None, 0, ctypes.byref(required)
+        )
+        if required.value == 0:
+            return f"GetTokenInformation size probe failed (error {_kernel32.GetLastError()})"
+
+        buf = ctypes.create_string_buffer(required.value)
+        actual = _wt.DWORD(0)
+        if not _advapi32.GetTokenInformation(
+            token, _TOKEN_APP_CONTAINER_SID, buf, required.value, ctypes.byref(actual)
+        ):
+            return f"GetTokenInformation failed (error {_kernel32.GetLastError()})"
+
+        # TOKEN_APPCONTAINER_INFORMATION is one PSID field. Null means the
+        # process has no AppContainer SID at all, so it isn't confined.
+        sid_ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
+        if not sid_ptr:
+            return "process token has no AppContainer SID, not confined"
+
+        str_ptr = ctypes.c_wchar_p()
+        if not _advapi32.ConvertSidToStringSidW(sid_ptr, ctypes.byref(str_ptr)):
+            return f"ConvertSidToStringSidW failed (error {_kernel32.GetLastError()})"
+        try:
+            actual_sid = str_ptr.value
+        finally:
+            _kernel32.LocalFree(str_ptr)
+
+        if actual_sid != handle.container_sid:
+            return f"confined under a different SID ({actual_sid}, expected {handle.container_sid})"
+        return None
+    finally:
+        _kernel32.CloseHandle(token)
+
 
 # Default AppContainer moniker prefix for probe profiles; override via
 # run_checks(moniker_prefix=...) to namespace them under your own app.
@@ -59,12 +144,19 @@ async def _async_run_one(
             affects=affects,
         )
 
+    # Checked while the process is still alive (or has only just exited),
+    # since the AppContainer token is assigned at process creation, before
+    # the target runs any of its own code. A confinement failure and a
+    # probe failure are different causes and get different messages below.
+    confinement_error = _verify_confinement(handle)
+
     try:
         exit_code = await asyncio.to_thread(handle._proc.wait)
         # sandbox_host.exe writes a final "exited" JSON line after launch()
         # already consumed the started-line; drain it so it's not left unread.
+        stdout_text = b""
         if handle._proc.stdout is not None:
-            await asyncio.to_thread(handle._proc.stdout.read)
+            stdout_text = await asyncio.to_thread(handle._proc.stdout.read)
     finally:
         # Each probe provisions a real, persistent AppContainer profile;
         # without this, repeated check runs leave every prior profile behind.
@@ -73,6 +165,17 @@ async def _async_run_one(
         except SandboxError:
             pass
 
+    if confinement_error is not None:
+        return CheckResult(
+            name=name,
+            status=CheckStatus.FAIL,
+            message=(
+                f"could not confirm AppContainer confinement: {confinement_error} "
+                f"(test exited with code {exit_code})"
+            ),
+            affects=affects,
+        )
+
     if exit_code == 0:
         return CheckResult(
             name=name,
@@ -80,13 +183,14 @@ async def _async_run_one(
             message=pass_message,
             affects=affects,
         )
+
+    detail = stdout_text.decode(errors="replace").strip() or "no output"
     return CheckResult(
         name=name,
         status=CheckStatus.FAIL,
         message=(
-            f"test exited with code {exit_code}, "
-            "AppContainer may be blocking a required API; "
-            "disable sandbox for affected components"
+            f"confinement confirmed, but the probe itself failed "
+            f"(exit code {exit_code}): {detail}"
         ),
         affects=affects,
     )
@@ -111,6 +215,11 @@ def _run_one(
     config = SandboxConfig(
         moniker=f"{moniker_prefix}.{name}",
         exe_path=str(exe),
+        # Probes load DLLs (SDL2, Qt) from their own directory, and some
+        # also enumerate it during init. "rx": "r" alone can't list a directory.
+        broker_files=[
+            BrokerFile(path=str(_SRC), access="rx", mode="grant"),
+        ],
         cpu_max_rate=50,
         cpu_min_rate=5,
     )

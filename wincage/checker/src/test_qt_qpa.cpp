@@ -22,6 +22,6 @@ int main() {
     box.exec();
 
     std::cout << "PASS: Qt QPA plugin loaded (platform=" << platform
-              << ") and QMessageBox displayed in AppContainer\n";
+              << ") and QMessageBox displayed\n";
     return 0;
 }

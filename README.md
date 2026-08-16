@@ -196,6 +196,15 @@ WARNING: [same caveat as above]
 | `SandboxProcess` | Process handle from `launch_suspended()`/`run_under_job()`; `.poll()`, `.terminate()`, `.kill()`, `.wait()`, `.resume()`. |
 | `WindowsJobObject` | Job Object wrapper from `run_under_job()`; `.set_memory_limit()`, `.set_cpu_limit()`, `.teardown()`, `.close()`. |
 
+`BrokerFile.access` values:
+
+| Access | Grants | Use for |
+|---|---|---|
+| `"r"` | `FILE_GENERIC_READ` | Opening specific files whose names you already know. |
+| `"rw"` | `FILE_GENERIC_READ` + `FILE_GENERIC_WRITE` | Same, plus writing those files. |
+| `"x"` | `FILE_TRAVERSE` | Passing through a directory to reach a path below it, without listing its contents. |
+| `"rx"` | `FILE_GENERIC_READ` + `FILE_TRAVERSE` | Listing a directory's contents. `"r"` alone can't: Windows denies a directory enumeration request unless traverse is granted too. |
+
 ### `wincage.checker`
 
 | Export | What it is |

@@ -88,10 +88,10 @@ int main() {
     SDL_Quit();
 
     if (is_software) {
-        std::cout << "FAIL: D3D11 adapter is software/WARP, GPU not accessible in AppContainer\n";
+        std::cout << "FAIL: D3D11 adapter is software/WARP, GPU not accessible\n";
         return 1;
     }
 
-    std::cout << "PASS: SDL2 init, WASAPI audio, and D3D11 hardware device all accessible in AppContainer\n";
+    std::cout << "PASS: SDL2 init, WASAPI audio, and D3D11 hardware device all accessible\n";
     return 0;
 }

@@ -22,6 +22,10 @@ wincage/checker/src/test_qt_qpa.exe
 wincage/checker/src/test_sdl2_d3d11.exe
 wincage/checker/src/test_sdl2_opengl.exe
 
+# Runtime DLLs copied by checker/src/build_tests.sh
+wincage/checker/src/SDL2.dll
+wincage/checker/src/libwinpthread-1.dll
+
 # Test / coverage
 .pytest_cache/
 .coverage

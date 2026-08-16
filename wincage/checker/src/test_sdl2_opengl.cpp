@@ -40,6 +40,6 @@ int main() {
     SDL_DestroyWindow(win);
     SDL_Quit();
 
-    std::cout << "PASS: OpenGL 4.5 core context created successfully in AppContainer\n";
+    std::cout << "PASS: OpenGL 4.5 core context created successfully\n";
     return 0;
 }

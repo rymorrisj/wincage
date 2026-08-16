@@ -37,24 +37,38 @@ fi
 
 # ── Build ────────────────────────────────────────────────────────────────────
 
+# ── Runtime linking ──────────────────────────────────────────────────────────
+# End users run the packaged app without MSYS2's ucrt64/bin on PATH, so the
+# MinGW C++ runtime must not be a runtime DLL dependency. SDL2 itself has no
+# static build in the MSYS2 package, so SDL2.dll is copied next to each exe
+# below instead.
+RUNTIME_FLAGS="-static-libgcc -static-libstdc++"
+
 echo "Building test_sdl2_d3d11.exe ..."
-g++ -std=c++20 -Wall -Wextra -O2 \
+g++ -std=c++20 -Wall -Wextra -O2 ${RUNTIME_FLAGS} \
     ${SDL_CFLAGS} \
     "$SCRIPT_DIR/test_sdl2_d3d11.cpp" \
     ${SDL_LIBS} -ld3d11 -ldxgi \
     -o "$SCRIPT_DIR/test_sdl2_d3d11.exe"
 
 echo "Building test_sdl2_opengl.exe ..."
-g++ -std=c++20 -Wall -Wextra -O2 \
+g++ -std=c++20 -Wall -Wextra -O2 ${RUNTIME_FLAGS} \
     ${SDL_CFLAGS} \
     "$SCRIPT_DIR/test_sdl2_opengl.cpp" \
     ${SDL_LIBS} \
     -o "$SCRIPT_DIR/test_sdl2_opengl.exe"
 
+SDL_BINDIR="$(sdl2-config --prefix)/bin"
+echo "Copying SDL2.dll from $SDL_BINDIR ..."
+cp "$SDL_BINDIR/SDL2.dll" "$SCRIPT_DIR/SDL2.dll"
+
+echo "Copying libwinpthread-1.dll from $SDL_BINDIR ..."
+cp "$SDL_BINDIR/libwinpthread-1.dll" "$SCRIPT_DIR/libwinpthread-1.dll"
+
 if [[ "$BUILD_QT" -eq 1 ]]; then
     QT_FLAGS=$(pkg-config --cflags --libs Qt5Widgets)
     echo "Building test_qt_qpa.exe ..."
-    g++ -std=c++20 -Wall -Wextra -O2 \
+    g++ -std=c++20 -Wall -Wextra -O2 ${RUNTIME_FLAGS} \
         $(pkg-config --cflags Qt5Widgets) \
         "$SCRIPT_DIR/test_qt_qpa.cpp" \
         $(pkg-config --libs Qt5Widgets) \

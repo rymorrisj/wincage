@@ -7,7 +7,7 @@ from typing import Literal
 @dataclass
 class BrokerFile:
     path: str
-    access: Literal["r", "rw", "x"]
+    access: Literal["r", "rw", "x", "rx"]
     mode: Literal["secure", "inherit", "grant"]
 
 
