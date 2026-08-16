@@ -1,5 +1,4 @@
 #include "job.h"
-#include <string>
 
 JobObject::~JobObject() {
     // Closing this triggers JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, which kills
