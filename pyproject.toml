@@ -19,3 +19,10 @@ dependencies = []
 # originally wrapped it stays behind in that application's own tree.
 [tool.setuptools]
 packages = ["wincage", "wincage.checker"]
+
+# Scoped to exactly the prebuilt binaries the runtime needs. Not src/* or
+# checker/src/*: both src/ dirs also hold .cpp/.h sources and build_tests.sh,
+# which must stay out of the wheel.
+[tool.setuptools.package-data]
+wincage = ["sandbox_host.exe", "scripts/*.ps1"]
+"wincage.checker" = ["src/*.exe", "src/*.dll"]
