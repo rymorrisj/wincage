@@ -51,12 +51,12 @@ def _verify_confinement(handle: SandboxHandle) -> str | None:
     Returns None once confirmed, otherwise a short description of what
     could not be confirmed and why.
     """
-    if handle.process_handle is None:
-        return "no process handle reported by the host"
-
     token = _wt.HANDLE()
-    if not _advapi32.OpenProcessToken(handle.process_handle, _TOKEN_QUERY, ctypes.byref(token)):
-        return f"OpenProcessToken failed (error {_kernel32.GetLastError()})"
+    with handle._process_handle_lock:
+        if handle.process_handle is None:
+            return "no process handle reported by the host"
+        if not _advapi32.OpenProcessToken(handle.process_handle, _TOKEN_QUERY, ctypes.byref(token)):
+            return f"OpenProcessToken failed (error {_kernel32.GetLastError()})"
 
     try:
         required = _wt.DWORD(0)

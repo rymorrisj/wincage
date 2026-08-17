@@ -190,7 +190,8 @@ WARNING: [same caveat as above]
 | `SandboxPayload` | Passed to event callbacks. |
 | `SandboxStage` | Identifies which launch/teardown stage an error or payload refers to. |
 | `SandboxError` | Raised by `launch()`/`reset_container()`; carries `.stage` and `.suggestions`. |
-| `EXE_NAME` | Host executable name `launch()` spawns (default `"sandbox_host.exe"`); assignable before first call. |
+| `EXE_NAME` | Host executable name `launch()` spawns (default `"sandbox_host.exe"`). |
+| `set_exe_name(value)` | Changes `EXE_NAME` before the first `launch()` call, e.g. `wincage.set_exe_name("myhost.exe")`. |
 | `launch_suspended(exe, args, flags, ...)` | Starts a process suspended (native or AppContainer), returns a `SandboxProcess`. |
 | `run_under_job(executable_path, ..., process, job_name, ...)` | Assigns a suspended `SandboxProcess` to a new Job Object, resumes it, returns `(SandboxProcess, WindowsJobObject)`. |
 | `SandboxProcess` | Process handle from `launch_suspended()`/`run_under_job()`; `.poll()`, `.terminate()`, `.kill()`, `.wait()`, `.resume()`. |

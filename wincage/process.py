@@ -135,7 +135,19 @@ def _launch_in_container(
     # by pid. This closes the pid-reuse race: the target is a deliberate
     # crash boundary, and a bare pid could already refer to an unrelated
     # process by the time Python looked it up.
-    if sandbox_handle.process_handle is None:
+    #
+    # Claim ownership atomically: grab the value and null the field under
+    # the same lock CLEANED_UP's close uses, so this always either claims a
+    # live handle before CLEANED_UP can close it, or observes None because
+    # CLEANED_UP already claimed and closed it first. The claim itself must
+    # stay outside any call that waits on CLEANED_UP (below): _fire() needs
+    # this same lock to run its own close+null, so holding it across a wait
+    # for CLEANED_UP would deadlock the two against each other.
+    with sandbox_handle._process_handle_lock:
+        win32_handle = sandbox_handle.process_handle
+        sandbox_handle.process_handle = None
+
+    if win32_handle is None:
         try:
             asyncio.run(sandbox_handle.terminate())
         except Exception as te:
@@ -148,8 +160,6 @@ def _launch_in_container(
             f"sandbox_host.exe did not report a process_handle for "
             f"container pid {sandbox_handle.pid}. It may be an older build."
         )
-
-    win32_handle = sandbox_handle.process_handle
 
     return SandboxProcess(
         pid=sandbox_handle.pid,

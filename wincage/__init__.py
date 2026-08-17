@@ -14,12 +14,10 @@ from .job import WindowsJobObject
 EXE_NAME: str = _sandbox_module.EXE_NAME
 
 
-def __setattr__(name: str, value: object) -> None:
-    # Write-through so `import wincage; wincage.EXE_NAME = "x"` takes effect
-    # on the submodule that _exe() reads from.
-    globals()[name] = value
-    if name == "EXE_NAME":
-        _sandbox_module.EXE_NAME = value  # type: ignore[assignment]
+def set_exe_name(value: str) -> None:
+    """Set the host executable name launch() spawns, overriding the sandbox_host.exe default."""
+    globals()["EXE_NAME"] = value
+    _sandbox_module.EXE_NAME = value
 
 
 __all__ = [
@@ -27,6 +25,7 @@ __all__ = [
     "reset_container",
     "revoke_grants",
     "EXE_NAME",
+    "set_exe_name",
     "SandboxConfig",
     "SandboxHandle",
     "SandboxEvent",

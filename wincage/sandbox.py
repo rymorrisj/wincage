@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import json
 import logging
 import os
@@ -156,6 +157,11 @@ class SandboxHandle:
     # Set to True by _fire() once CLEANED_UP has been dispatched, so that
     # terminate() can detect the event already fired before it registered.
     _cleaned_up: bool = field(default=False, compare=False, hash=False)
+    # Guards process_handle against a close (CLEANED_UP in _fire()) racing a
+    # read (checker.py, process.py) that wants to use it before it closes.
+    _process_handle_lock: threading.Lock = field(
+        default_factory=threading.Lock, compare=False, hash=False, repr=False
+    )
     # STARTED always happens before the caller can possibly have a handle to
     # register a listener on, so it is stashed here instead of dispatched via
     # _fire(), and replayed to each callback as it registers in on().
@@ -305,6 +311,18 @@ def _fire(
     # callback re-enters _fire or inspects _cleaned_up synchronously.
     if event == SandboxEvent.CLEANED_UP:
         handle._cleaned_up = True
+        # Only true for direct launch() callers still holding the handle.
+        # process.py's container path nulls this out itself once it hands
+        # the handle to a SandboxProcess, which owns and closes it instead.
+        #
+        # Lock scope stops at the close+null, released before the callback
+        # loop below runs. Callbacks are user-supplied and could themselves
+        # touch process_handle; Lock is not reentrant, so holding it across
+        # that loop would risk a self-deadlock.
+        with handle._process_handle_lock:
+            if handle.process_handle is not None:
+                ctypes.windll.kernel32.CloseHandle(handle.process_handle)
+                handle.process_handle = None
     for cb in handle._callbacks.get(event, []):
         try:
             cb(payload)
