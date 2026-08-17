@@ -631,7 +631,7 @@ def launch(config: SandboxConfig) -> SandboxHandle:
                 logger.error("%s stderr: %s", EXE_NAME, stderr_text)
 
 
-def reset_container(moniker: str) -> None:
+def reset_container(moniker: str, broker_files: list[BrokerFile] | None = None) -> None:
     if not moniker:
         raise SandboxError(
             message="moniker must not be empty",
@@ -641,6 +641,12 @@ def reset_container(moniker: str) -> None:
                 "the sandbox, i.e. SandboxConfig.moniker",
             ],
         )
+
+    # Deleting the profile alone leaves any DACL ACEs granted to its SID orphaned.
+    # Revoking first (order doesn't matter, see revoke_grants()) closes that gap
+    # for callers who still have the broker_files list on hand.
+    if broker_files:
+        revoke_grants(moniker, broker_files)
 
     try:
         proc = subprocess.run(

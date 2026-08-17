@@ -171,7 +171,7 @@ async def _async_run_one(
         # Each probe provisions a real, persistent AppContainer profile;
         # without this, repeated check runs leave every prior profile behind.
         try:
-            reset_container(config.moniker)
+            reset_container(config.moniker, config.broker_files)
         except SandboxError:
             pass
 
