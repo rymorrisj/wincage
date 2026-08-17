@@ -97,11 +97,15 @@ def _drain_stderr(proc: subprocess.Popen) -> None:
         pass
 
 
-# Reasonable upper bound for a Win32 PID. DWORD-sized, but Windows never
-# actually assigns process IDs anywhere near the top of that range. This
-# is a sanity check against a corrupted/malicious value, not a real
-# limit.
+# DWORD-sized for win32 PID but Windows never actually assigns process IDs 
+# anywhere near the top of that range. This is a sanity check against a corrupted/malicious 
+# value, not a real limit.
 _MAX_SANE_PID = 0x7FFFFFFF
+
+# Upper bound for a duplicated Win32 HANDLE value (pointer-sized on x64).
+# Same sanity-check role as _MAX_SANE_PID: not a real limit, just a guard
+# against a corrupted/malicious value being used directly as a HANDLE.
+_MAX_SANE_HANDLE = 0xFFFFFFFFFFFFFFFF
 
 # How long launch() waits for the host's handshake line on stdout before
 # killing it and giving up.
@@ -464,6 +468,21 @@ def _validate_handshake_response(response: dict) -> int:
             stage=SandboxStage.PROCESS_CREATE,
             suggestions=[],
         )
+
+    # process_handle is optional but when present and non-null it is used directly as a Win32
+    # HANDLE. Note: a wrong but valid value would be passed straight into WinAPI calls.
+    process_handle = response.get("process_handle")
+    if process_handle is not None:
+        if (
+            isinstance(process_handle, bool)
+            or not isinstance(process_handle, int)
+            or not (0 < process_handle <= _MAX_SANE_HANDLE)
+        ):
+            raise SandboxError(
+                message=f"{EXE_NAME} reported an invalid process_handle: {process_handle!r}",
+                stage=SandboxStage.PROCESS_CREATE,
+                suggestions=[],
+            )
 
     return pid
 
