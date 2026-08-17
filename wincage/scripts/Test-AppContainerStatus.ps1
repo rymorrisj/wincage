@@ -35,7 +35,7 @@
 .PARAMETER Moniker
     The sandbox package moniker to search or verify against, the same string
     passed as SandboxConfig.moniker when the process was launched (see the
-    moniker section of ../README.md).
+    moniker section of ../../README.md).
 
 .PARAMETER ProcessId
     Optional. The process ID (PID) of a specific running process to check

@@ -1,8 +1,9 @@
 # wincage
 
 [![Windows Only](https://img.shields.io/badge/platform-Windows--10%20%2F%2011-blue.svg)](https://microsoft.com/windows)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Dependencies: Zero](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)]()
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![Runtime Dependencies: Zero](https://img.shields.io/badge/runtime%20deps-zero-brightgreen.svg)]()
+[![Build: MSYS2 UCRT64](https://img.shields.io/badge/build-MSYS2%20UCRT64-blue.svg)](https://github.com/msys2)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 [Peach 1UP](https://github.com/rymorrisj/peach_1up) runs a wide variety of third-party emulator software, and that software doesn't always behave. Hanging processes, memory leaks, and runaway CPU usage are common failure modes with binaries you didn't write and can't patch. wincage gives a host application a control layer over that: hard resource limits and process isolation. GPU and audio access stay intact, which those emulators need to work.
@@ -77,7 +78,9 @@ config = wincage.SandboxConfig(
     ],
     cpu_max_rate=60,
     cpu_min_rate=5,
+    skip_cpu_limit=False,          # True skips the CPU rate limit entirely; memory_limit_mb still applies
     memory_limit_mb=512,
+    breakaway=False,                # True passes CREATE_BREAKAWAY_FROM_JOB, for targets whose parent job forbids a second job assignment
 )
 
 handle = wincage.launch(config)   # synchronous; raises SandboxError on failure
@@ -167,7 +170,7 @@ is created unnamed, so it cannot be looked up directly by moniker.
 For a definitive answer, check Sysinternals Process Explorer:
   select the process > Properties > Job tab > view the actual configured limits.
 
-PS> .\Test-JobObjectStatus.ps1 -ProcessId 26292
+PS> .\Test-JobObjectStatus.ps1 -Moniker "Peach1UP.duckstation.shared" -ProcessId 26292
 Checking Job Object status for PID 26292 (duckstation-qt-x64-ReleaseLTCG)...
 IsProcessInJob: True
 WARNING: [same caveat as above]
@@ -206,6 +209,14 @@ WARNING: [same caveat as above]
 | `"x"` | `FILE_TRAVERSE` | Passing through a directory to reach a path below it, without listing its contents. |
 | `"rx"` | `FILE_GENERIC_READ` + `FILE_TRAVERSE` | Listing a directory's contents. `"r"` alone can't: Windows denies a directory enumeration request unless traverse is granted too. |
 
+`BrokerFile.mode` values:
+
+| Mode | Effect | Use for |
+|---|---|---|
+| `"secure"` | Sets a DACL ACE on the existing file/directory for the container SID, no propagation. | A single existing file. |
+| `"grant"` | Sets a DACL ACE and propagates it across the existing tree under `path`. | A directory the target needs to browse or write into. |
+| `"inherit"` | Never touches the DACL. The host opens `path` with an inheritable handle and passes its value to the child as the environment variable `SANDBOX_HANDLE_<i>`, where `<i>` is that entry's index in `broker_files`. The child reads `SANDBOX_HANDLE_<i>` and casts it back to a `HANDLE` to use the file the host already opened. | A single file, when you'd rather not touch the filesystem ACL at all. |
+
 ### `wincage.checker`
 
 | Export | What it is |
@@ -238,33 +249,40 @@ wincage/                  # sandbox core
     └── src/               # capability-probe test programs + build_tests.sh
 ```
 
+## Tests
+
+`wincage/tests/` holds the manual verification scripts used during development that kind of became the current test suit.
+
+Run them with `python wincage/tests/run_tests.py`, which runs every `test_*.py` script in the directory and prints a pass/fail/skip line for each.
+
 ## Tests, diagnostics, and checks
 
-Three separate things in this repo can look like "the test suite" but answer different questions:
+This repo has three separate things that look like "tests":
 
-- **`wincage/tests/` (`python wincage/tests/run_tests.py`)** is wincage's own regression suite. It proves wincage's code behaves correctly: launch/terminate lifecycle, capture, ACL grants, resource limits. Run it after any change to `sandbox.py`, `sandbox_config.py`, `main.cpp`, or `checker.py`. `test_job_inspect.py` is excluded from the automated run; it needs a human at Process Explorer within a live 60-second window, see its own docstring to run it by hand.
-- **`wincage/scripts/*.ps1`** are live diagnostic tools, not a regression suite. They inspect AppContainer/Job Object isolation state on an already-running process (`Get-ProcessAppContainerSidString`, Job Object queries) to debug or confirm isolation on a real system. There's nothing to "pass" here, just state to read. See [Runtime diagnostic scripts](#runtime-diagnostic-scripts) above.
-- **`wincage.checker` (`run_checks()`)** is for developers integrating wincage into their own project. It answers "does D3D11/OpenGL/Qt survive confinement on *this* machine, for *my* workload," not "is wincage's own code correct." Run it against your target machines before relying on confinement in your application.
+- `wincage/tests/` — the actual regression suite. Run `python wincage/tests/run_tests.py` after
+  touching `sandbox.py`, `sandbox_config.py`, `main.cpp`, or `checker.py`. `test_job_inspect.py` runs
+  separately by hand (needs Process Explorer open for 60 seconds).
+- `wincage/scripts/*.ps1` — diagnostic tools for a live process, not a test suite. Use them to check
+  AppContainer/Job Object isolation on something already running. See [Runtime diagnostic
+  scripts](#runtime-diagnostic-scripts).
+- `wincage.checker.run_checks()` — checks whether D3D11/OpenGL/Qt survive confinement on your machine.
+  Run it before shipping something that needs GPU/UI access under wincage.
 
 ## Known limitations
 
-- **Windows only.** Both `sandbox_host.exe` and the Python wrapper's `ctypes.windll` calls require Win32 AppContainer/Job Object APIs. Import fails on non-Windows hosts.
-- **DACL grants persist on the path.** `mode="grant"`/`"secure"` modify the filesystem ACL and don't revert on exit. `grant` also propagates its ACE across the existing tree. Broker only what's needed. Prefer `secure`/`inherit` over `grant` for a single file. Grants still don't auto-revert; call `revoke_grants(moniker, broker_files)` with the same list you granted with when you want the ACEs removed.
-- **The crash-safety marker can be left behind.** `grant_directory`/`revoke_directory` write a `:wincage.pending` alternate data stream before a recursive walk and clear it on success. If the walk is interrupted and that path is never granted or revoked again, the marker stays on disk. It's inert: the only effect is forcing a full re-walk the next time that path is touched.
-- **The crash-safety marker needs NTFS or ReFS.** It's stored as an alternate data stream, which FAT32 and exFAT don't support. On those filesystems the marker write silently fails, so crash detection and forced re-walk after an interrupted grant or revoke both silently stop working; behavior reverts to what it was before that fix.
-- **Container profiles are never auto-deleted.** A provisioned profile persists across launches and reboots by design. `reset_container()` removes one. ACEs already granted to a deleted profile's SID aren't cleaned up.
-- **Qt's platform plugin fails under a memory cap.** It allocates a large heap at startup and aborts if the Job Object limit hits before the window appears. Pass `memory_limit_mb=None` for these processes. CPU limits still apply.
-- **Raw device I/O is incompatible with AppContainer.** `DeviceIoControl` against a raw device handle fails under confinement. Nothing grants it back. Use `launch_suspended()`/`run_under_job()`, the native path, instead for these processes.
-- **`sandbox_host.exe` and the checker's probe binaries are build artifacts, not committed source.** Both must be compiled first (see Install / build above).
+- **DACL grants persist on the path.** `mode="grant"`/`"secure"` modify the filesystem ACL and don't revert on exit. `grant` also propagates its ACE across the existing tree. Broker only what's needed, and prefer `secure`/`inherit` over `grant` for a single file. Set `should_revert_grants=True` on `SandboxConfig` to have grants revoked automatically at cleanup, or call `revoke_grants(moniker, broker_files)` yourself with the same list you granted with.
+- **A crash mid-grant can leave a stray marker file.**`grant_directory`/`revoke_directory` write a `:wincage.pending` marker before it starts and removes it when done. If the process is killed partway the marker is left behind. It's harmless, the only effect is that the next grant or revoke on that folder redoes the full check instead of trusting the previous one.
+- **That marker doesn't work on FAT32/exFAT drives.** It relies on an NTFS/ReFS-only feature. On FAT32 or exFAT, the marker silently fails to write, so a crash mid-grant won't be detected or corrected automatically. NTFS/ReFS are the filesystems Windows uses for its main C drive
+- **`broker_files` paths are capped at MAX_PATH (260 characters).** Grant/secure/inherit all reach the file through the plain Win32 file APIs, no `\\?\` long-path prefix. A longer path fails the grant outright.
+- **Low level device I/O is not sandboxed** `DeviceIoControl` is a function in kernel32.dll that AppContainer blocks acces to without additional steps wincage does not take. Use `launch_suspended()`/`run_under_job()`, the native path, instead for these processes. 
 
 ## Security disclaimer
 
-Read this before relying on `wincage` as a security control rather than a resource-limiting measure.
+Read this before relying on `wincage` as a hard security control layer
 
-- AppContainer plus a Job Object reduces what a launched process can reach. **It does not eliminate that risk.**
+- AppContainer plus a Job Object reduces what a launched process can reach. **It does not eliminate risk.**
 - A process started through `launch()` still runs as the launching user's identity. It still has whatever `broker_files` paths you granted it. It still shares the desktop, window station, audio session, and GPU with everything else that user runs. Its access to that shared desktop and window station is narrowed to creating and drawing its own window and receiving its own input, not the hooks, clipboard, or screen-capture access that would let it interfere with other apps on it.
 - **This is not a complete sandbox against malicious or untrusted code.** It's built for code you already trust: your own executables, a plugin or worker whose failure mode is a bug rather than an attack, or a third-party tool you're limiting for robustness. It has had an internal logic/pattern review (ACL over-grant paths, desktop/window-station access scope, PID reuse, JSON parser input handling), not a penetration test or formal security assessment. It also was never designed as a containment boundary for hostile code: no adversarial threat model, no fuzzing.
-- Working around raw device I/O incompatibility usually means weakening confinement. The Job-Object-only fallback drops AppContainer entirely and keeps only resource limits. See Known limitations.
 - `run_checks()` tells you whether an API stack survives confinement on a given machine. It does not tell you confinement is sufficient for your threat model.
 - For a hard security boundary against actively distrusted code, use a VM or dedicated hardware isolation instead.
 

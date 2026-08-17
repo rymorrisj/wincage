@@ -15,8 +15,9 @@
     job", not "is it in OUR job with our specific CPU/memory limits applied."
     On Windows 11, essentially every process is pre-assigned to an OS-managed job
     by default (see this package's own src/main.cpp, IsProcessInJob comment, and
-    SECURITY.md). That means this check can report True even when the sandbox
-    package's own resource-limiting job was never applied to the process. A True
+    the Security disclaimer section of ../../README.md). That means this check
+    can report True even when the sandbox package's own resource-limiting job
+    was never applied to the process. A True
     result is NOT proof that the app's CPU/memory limits are active, only that
     the process sits in some job, which may or may not be the sandbox's own.
 

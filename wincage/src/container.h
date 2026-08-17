@@ -22,9 +22,8 @@ public:
     HRESULT secure_existing_file(const std::wstring& path, DWORD access_mask);
     HRESULT grant_directory(const std::wstring& path, DWORD access_mask);
 
-    // Computes sid_ from moniker_ without provisioning a profile. Revoke has
-    // no reason to create a profile that doesn't exist just to compute the
-    // SID whose ACEs it's trying to remove.
+    // Computes sid_ from moniker_ without provisioning a profile. revoke has no
+    // reason to create a profile just to compute the SID it's removing ACEs for.
     HRESULT derive_sid();
     HRESULT revoke_existing_file(const std::wstring& path);
     HRESULT revoke_directory(const std::wstring& path);

@@ -158,18 +158,14 @@ class PROCESS_INFORMATION(ctypes.Structure):
 # kernel32 function signatures
 # ---------------------------------------------------------------------------
 #
-# An undeclared ctypes function defaults to restype=c_int (32-bit signed).
-# HANDLE is pointer-sized, so on Win64 that would truncate a returned
-# HANDLE to its low 32 bits. This has only worked by luck: Windows
-# guarantees kernel handles fit in 32 bits (a WOW64-interop requirement),
-# not because these calls were declared correctly.
+# An undeclared ctypes function defaults to restype=c_int (32-bit signed);
+# HANDLE is pointer-sized, so on Win64 that would truncate a returned HANDLE
+# to its low 32 bits. This works today only because Windows guarantees kernel
+# handles fit in 32 bits, not because these calls were declared correctly.
 #
-# ctypes.windll.kernel32 is a process-wide singleton and each function is
-# cached on first access, so declaring argtypes/restype here, once, fixes
-# every call site across the package (job.py, process.py,
-# sandbox_process.py, sandbox.py) as long as this module is imported
-# first. sandbox.py doesn't otherwise need win32_types; it imports it only
-# for that side effect.
+# ctypes.windll.kernel32 is a singleton with per-function caching, so declaring
+# argtypes/restype here once fixes every call site package-wide, as long as
+# this module is imported first (sandbox.py imports it only for that side effect).
 _kernel32 = ctypes.windll.kernel32
 _wt = ctypes.wintypes
 

@@ -38,11 +38,8 @@ template<> inline std::string        JVal::get<std::string>()           const {
     if (tag != T::Str)  throw std::runtime_error("expected string");
     return str;
 }
-// Casting an out of range or negative double to an unsigned integer type is
-// undefined behaviour in C++ (not just a truncating wraparound), so every
-// numeric field pulled from the launch JSON (cpu_max_rate, parent_pid,
-// memory_limit_mb, ...) is range-checked here before the cast, rather than
-// trusting the Python side to have only ever sent well-formed values.
+// Casting an out-of-range or negative double to an unsigned type is undefined
+// behaviour in C++, so every numeric field from the launch JSON is range-checked here before the cast rather than trusted.
 template<> inline unsigned long      JVal::get<unsigned long>()         const {
     if (tag != T::Num)  throw std::runtime_error("expected number");
     // NaN compares false against every bound, including itself, so it slips
@@ -64,9 +61,8 @@ template<> inline bool               JVal::get<bool>()                  const {
 
 namespace json_detail {
 
-// Appends the UTF-8 encoding of one Unicode code point to *s*. Used to decode
-// \uXXXX escapes (and surrogate pairs) into the UTF-8 byte strings JVal::str
-// holds elsewhere in this parser.
+// Appends the UTF-8 encoding of one Unicode code point to *s*. Decodes
+// \uXXXX escapes (and surrogate pairs) into JVal::str's UTF-8 byte strings.
 inline void append_utf8(std::string& s, unsigned int cp) {
     if (cp <= 0x7F) {
         s += static_cast<char>(cp);
@@ -98,9 +94,8 @@ struct Parser {
             throw std::runtime_error(std::string("expected '") + c + '\'');
         ++p;
     }
-    // p points at 'u'; reads the 4 hex digits that follow it and leaves p on
-    // the last of those digits (matching every other case in parse_str()'s
-    // switch, where p is left on the last character consumed).
+    // p points at 'u' and reads the 4 hex digits after it and leaves p on the last
+    // digit, matching every other case in parse_str()'s switch.
     unsigned int parse_hex4() {
         if (p + 4 >= end) throw std::runtime_error("truncated \\u escape");
         unsigned int v = 0;
@@ -229,10 +224,9 @@ class JsonOut {
     static std::string quote(const std::string& s) {
         static const char* hexdig = "0123456789abcdef";
         std::string r = "\"";
-        // unsigned char: a signed char with the high bit set (any UTF-8
-        // continuation byte) sign-extends to a negative int, which would
-        // wrongly satisfy `c < 0x20` below and mangle it into a bogus
-        // \u00XX escape instead of passing it through as UTF-8 payload.
+        // unsigned char: a signed char with the high bit set sign-extends to a
+        // negative int, which would wrongly satisfy `c < 0x20` and mangle UTF-8
+        // continuation bytes into bogus \u00XX escapes.
         for (unsigned char c : s) {
             if      (c == '"')  r += "\\\"";
             else if (c == '\\') r += "\\\\";
@@ -242,11 +236,9 @@ class JsonOut {
             else if (c == '\b') r += "\\b";
             else if (c == '\f') r += "\\f";
             else if (c < 0x20) {
-                // Every other C0 control byte must be escaped per RFC 8259;
-                // an unescaped one makes the whole line unparseable. Only
-                // matters once a string can hold uncontrolled data (e.g.
-                // captured target process output), but applies here to
-                // every JsonOut string for the same reason.
+                // Every other C0 control byte must be escaped per RFC 8259, or the
+                // line becomes unparseable. Matters once a string can hold
+                // uncontrolled data (e.g. captured target output), so it applies here to every string.
                 r += "\\u00";
                 r += hexdig[(c >> 4) & 0xF];
                 r += hexdig[c & 0xF];

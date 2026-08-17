@@ -19,23 +19,9 @@ from .results import CheckResult, CheckStatus
 
 _SRC = Path(__file__).parent / "src"
 
-# ---------------------------------------------------------------------------
-# AppContainer confinement verification
-# ---------------------------------------------------------------------------
-#
-# Same Win32 shape as ../scripts/Test-AppContainerStatus.ps1's
-# Get-ProcessAppContainerSidString: OpenProcessToken, then GetTokenInformation
-# with TokenAppContainerSid, probing for the required buffer size first.
-# Unlike that script, this doesn't need DeriveAppContainerSidFromAppContainerName
-# to compute the expected SID: SandboxHandle.container_sid already carries it,
-# derived by sandbox_host.exe itself during launch(). It also doesn't need its
-# own OpenProcess call: handle.process_handle already carries
-# PROCESS_QUERY_LIMITED_INFORMATION, which OpenProcessToken accepts directly
-# (see main.cpp's DuplicateHandle call).
-#
-# ctypes.windll.kernel32's argtypes/restype are set up by win32_types.py's
-# side effect import, already triggered above via `from ..sandbox import`.
-
+# Mirrors ../scripts/Test-AppContainerStatus.ps1's Get-ProcessAppContainerSidString,
+# but skips SID derivation and its own OpenProcess call since handle.container_sid
+# and handle.process_handle already provide both.
 _TOKEN_QUERY = 0x0008
 _TOKEN_APP_CONTAINER_SID = 31
 
@@ -105,14 +91,12 @@ def _verify_confinement(handle: SandboxHandle) -> str | None:
 # run_checks(moniker_prefix=...) to namespace them under your own app.
 DEFAULT_MONIKER_PREFIX: str = "SandboxChecker"
 
-# (name, exe_name, pass_message)
-#
-# What a probe verifies is a property of the capability, not the caller,
-# so which programs a failure impacts comes from run_checks(affects=...).
-# How long _async_run_one waits for a launched probe to exit on its own
-# before giving up, terminating it, and reporting a timeout failure.
+# Seconds _async_run_one waits for a launched probe to exit before
+# terminating it and reporting a timeout failure.
 _PROBE_WAIT_TIMEOUT_SECONDS = 30.0
 
+# (name, exe_name, pass_message); which programs a failure affects is
+# supplied by the caller via run_checks(affects=...), not stored here.
 _CHECKS: list[tuple[str, str, str]] = [
     (
         "sdl2_d3d11",
@@ -156,12 +140,8 @@ async def _async_run_one(
         )
 
     try:
-        # Checked while the process is still alive (or has only just
-        # exited), since the AppContainer token is assigned at process
-        # creation, before the target runs any of its own code. A
-        # confinement failure and a probe failure are different causes and
-        # get different messages below. Inside the try so a raise here
-        # still reaches the finally's reset_container cleanup below.
+        # Works even if the process has already exited: the AppContainer token is
+        # assigned at process creation, before the target runs any of its own code.
         confinement_error = _verify_confinement(handle)
 
         try:
@@ -274,33 +254,18 @@ def run_checks(
     moniker_prefix: str = DEFAULT_MONIKER_PREFIX,
     affects: Mapping[str, list[str]] | None = None,
 ) -> list[CheckResult]:
-    """Run every capability probe and return one CheckResult per probe.
+    """Run every capability probe and return one CheckResult per probe, never raising for a per-probe failure.
 
-    Never raises for a per-probe failure:
-        - A probe that cannot launch, or that exits non-zero, comes back as CheckStatus.FAIL.
-        - A probe whose binary was never built, or is older than its source, comes back as CheckStatus.SKIP.
-
-    Raises SandboxError if called from within a running event loop, since
-    each probe launch internally needs asyncio.run().
+    Raises SandboxError if called from a running event loop, since each probe launch needs its own asyncio.run().
 
     Args:
-        moniker_prefix: AppContainer moniker prefix for the probe profiles, which
-            are provisioned as f"{moniker_prefix}.{check_name}". These are persistent 
-            per-user profiles, so pass a prefix that namespaces them under the calling 
-            application.
-        affects: Optional mapping of check name to the caller's own list of
-            impacted components, copied verbatim onto the matching CheckResult.
-            Names absent from the mapping get an empty list. The checker reports
-            which capability failed
-
-    Returns:
-        A list of CheckResult, one per entry in _CHECKS, in declaration order.
+        moniker_prefix: namespaces the persistent per-user AppContainer
+            profiles this provisions, as f"{moniker_prefix}.{check_name}".
+        affects: caller's impacted-components list per check name, copied
+            onto the matching CheckResult; names absent get an empty list.
     """
-    # sandbox_host.exe must be built alongside wincage/ before calling
-    # run_checks(), see the repo root README.md.
-    # _run_one() calls asyncio.run() per probe, which raises a raw RuntimeError
-    # if a loop is already running on this thread. Detect that up front and
-    # fail with a clear SandboxError instead of letting that leak.
+    # asyncio.run() raises a raw RuntimeError if a loop is already running on
+    # this thread; detect that up front and fail with a clear SandboxError instead.
     try:
         asyncio.get_running_loop()
     except RuntimeError:

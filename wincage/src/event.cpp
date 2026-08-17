@@ -1,10 +1,8 @@
 #include "event.h"
 #include <sstream>
 
-// Own PID makes the event name unique per launch, not just per
-// (moniker, parent_pid): two concurrent launches of the same target
-// process share both, and without this suffix would race on CreateEventW
-// for one identical name.
+// Own PID makes the event name unique per launch; two concurrent launches of
+// the same target would otherwise share (moniker, parent_pid) and race on CreateEventW.
 SandboxEvent::SandboxEvent(const std::wstring& moniker, DWORD pid) {
     std::wostringstream oss;
     oss << L"Local\\Sandbox_" << moniker << L"_" << pid << L"_" << GetCurrentProcessId();
@@ -28,13 +26,10 @@ EventResult SandboxEvent::create() {
     );
     if (!handle_) return EventResult::Failed;
 
-    // CreateEventW returns a handle to the EXISTING event on a name
-    // collision instead of failing, so two unrelated launches could end up
-    // sharing one kernel event and unblocking each other's Python watcher.
-    //
-    // The PID suffix above should make this unreachable in practice, but
-    // this is treated as fatal rather than silently shared. Mirrors
-    // job.py's ERROR_ALREADY_EXISTS handling for job names.
+    // CreateEventW returns the EXISTING event on a name collision instead of
+    // failing, which could let two unrelated launches share one kernel event and
+    // unblock each other's watcher. The PID suffix above should make this
+    // unreachable, but it's treated as fatal rather than silently shared.
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(handle_);
         handle_ = nullptr;

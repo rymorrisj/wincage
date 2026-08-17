@@ -23,14 +23,11 @@ static std::string hex32(DWORD v) {
 static std::wstring to_wide(const std::string& s) {
     if (s.empty()) return {};
     int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-    // Guards the `n - 1` below. On failure n is 0, and std::wstring(-1, ...)
-    // reinterprets that as a huge size_t allocation request.
+    // Guards the `n - 1` below: on failure n is 0, and std::wstring(-1, ...) would
+    // reinterpret that as a huge size_t allocation request.
     //
-    // dwFlags is 0, so malformed UTF-8 is silently replaced with U+FFFD
-    // rather than failing. This is not an input validity check.
-    //
-    // Throwing here happens before any Win32 resource is allocated, so
-    // main()'s catch has nothing to leak.
+    // dwFlags is 0, so malformed UTF-8 is silently replaced with U+FFFD rather
+    // than failing; this is not an input validity check.
     if (n <= 0) {
         throw std::runtime_error(
             "MultiByteToWideChar (size query) failed (" + hex32(GetLastError()) + ")");
@@ -43,12 +40,10 @@ static std::wstring to_wide(const std::string& s) {
     return w;
 }
 
-// Narrowing counterpart to to_wide(). Used for error messages that embed
-// a path.
+// Narrowing counterpart to to_wide(), used for error messages that embed a path.
 //
-// sandbox.py json.loads()es the raw bytes, so a non-ASCII path must
-// survive the trip back to Python as valid UTF-8 instead of being
-// mangled by a wchar-to-char truncation.
+// sandbox.py json.loads()es the raw bytes, so a non-ASCII path must survive as
+// valid UTF-8 rather than being mangled by a wchar-to-char truncation.
 static std::string to_utf8(const std::wstring& w) {
     if (w.empty()) return {};
     int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1,
@@ -88,8 +83,7 @@ static DWORD access_to_mask(const std::wstring& access) {
     if (access == L"rw") return 0x0012019F; // FILE_GENERIC_READ | FILE_GENERIC_WRITE
     if (access == L"x")  return 0x000000A0; // FILE_TRAVERSE | FILE_READ_ATTRIBUTES
     // "r" alone can't enumerate a directory: FILE_GENERIC_READ carries
-    // FILE_LIST_DIRECTORY but not FILE_TRAVERSE, and Windows denies a
-    // CreateFile that requests both together if either is missing.
+    // FILE_LIST_DIRECTORY but not FILE_TRAVERSE, which CreateFile also requires.
     if (access == L"rx") return 0x001200A9; // FILE_GENERIC_READ | FILE_TRAVERSE
     return 0x00120089;                      // FILE_GENERIC_READ
 }
@@ -109,9 +103,8 @@ struct LaunchConfig {
     JobConfig job_config;
     DWORD parent_pid;
     bool breakaway;
-    // Independent opt-in signal, not inferred from any broker_files mode:
-    // gating the target-stdout pipe on this alone means callers who don't
-    // set it (including every existing caller) are unaffected.
+    // Independent opt-in signal, not inferred from any broker_files mode, so
+    // callers who don't set it (every existing caller) are unaffected.
     bool capture_target_stdout;
 };
 
@@ -147,9 +140,8 @@ static LaunchConfig parse_config(const JVal& j) {
     auto& jc = j.at("job_config");
     cfg.job_config.cpu_max_rate        = jc.at("cpu_max_rate").get<DWORD>();
     cfg.job_config.cpu_min_rate        = jc.at("cpu_min_rate").get<DWORD>();
-    // Mandatory like skip_memory_limit: at() throws on absence rather than
-    // defaulting, so a payload that predates this field fails loudly instead of
-    // silently applying a CPU cap the descriptor asked to skip.
+    // at() throws on absence rather than defaulting, so a payload that predates
+    // this field fails loudly instead of silently applying an unwanted CPU cap.
     cfg.job_config.skip_cpu_limit      = jc.at("skip_cpu_limit").get<bool>();
     cfg.job_config.skip_memory_limit   = jc.at("skip_memory_limit").get<bool>();
     SIZE_T mb = jc.at("memory_limit_mb").get<SIZE_T>();
@@ -158,17 +150,16 @@ static LaunchConfig parse_config(const JVal& j) {
     return cfg;
 }
 
-// Quotes one argument per the CommandLineToArgvW escaping rules, ported
-// from CPython's subprocess.list2cmdline. process.py relies on the same
-// rules for wincage's native launch path.
+// Quotes one argument per the CommandLineToArgvW escaping rules, ported from
+// CPython's subprocess.list2cmdline.
 //
-// Without this, an argument containing '"' or ending in an odd run of
-// '\' breaks out of its quoted region and is re-read as separate
-// arguments by the child's own argv parser.
+// Without this, an argument containing '"' or ending in an odd run of '\'
+// breaks out of its quoted region and is re-read as separate arguments by
+// the child's own argv parser.
 //
 // The trailing-backslash handling is deliberately asymmetric: backslashes
-// immediately before the closing quote are doubled so they cannot escape
-// it, but trailing backslashes in an unquoted argument are left as is.
+// immediately before the closing quote are doubled so they can't escape it,
+// but trailing backslashes in an unquoted argument are left as is.
 static std::wstring quote_arg(const std::wstring& arg) {
     std::wstring result;
     bool needquote = arg.empty()
@@ -230,14 +221,11 @@ static std::vector<wchar_t> build_env_block(const std::vector<std::wstring>& ext
     return block;
 }
 
-// Owns a PROC_THREAD_ATTRIBUTE_LIST for the lifetime of one CreateProcessW
-// call.
+// Owns a PROC_THREAD_ATTRIBUTE_LIST for the lifetime of one CreateProcessW call.
 //
-// build() checks every step, but get() still returns the partial list
-// after a failure. Callers MUST honour build()'s return value: launching
-// with a partially built list means the AppContainer SID is silently
-// absent from the child's token, while the host reports a sandboxed
-// start.
+// Callers MUST honour build()'s return value: get() still returns the partial
+// list after a failure, and launching with it means the AppContainer SID is
+// silently absent from the child's token while the host reports a sandboxed start.
 //
 // `sc` and `handles` are referenced by the attribute list itself and must
 // stay alive and unmodified until CreateProcessW returns.
@@ -318,9 +306,7 @@ static int run_reset(const std::string& moniker_utf8) {
 }
 
 // Mirror of run_launch's broker_files loop, but every entry removes an ACE
-// instead of adding one. Every entry is attempted in order and the first
-// failure aborts, same as run_launch: a silently-skipped revoke leaves an
-// ACE the caller believes is gone.
+// instead of adding one; the first failure aborts so a revoke can't leave a stale ACE.
 static int run_revoke(const std::wstring& moniker,
                       const std::vector<BrokerFile>& broker_files) {
     AppContainer container(moniker);
@@ -379,11 +365,9 @@ static int run_launch(const LaunchConfig& cfg) {
         return 1;
     }
 
-    // Every broker_files entry is mandatory. A silently skipped grant leaves
-    // the child sealed inside the AppContainer with no access to its own
-    // media, saves, or config. That surfaces much later as an opaque
-    // in-child failure, so any failure here aborts the launch and reports
-    // on the DACL_GRANT stage.
+    // Every broker_files entry is mandatory: a silently skipped grant leaves the
+    // child sealed inside the AppContainer, surfacing much later as an opaque
+    // in-child failure, so any failure here aborts the launch.
     std::vector<HANDLE>       inherit_handles;
     std::vector<std::wstring> sandbox_env_vars;
 
@@ -437,22 +421,19 @@ static int run_launch(const LaunchConfig& cfg) {
                                  hex32(static_cast<DWORD>(hr)));
 
         } else {
-            // Unrecognised mode: none of the branches above would apply any
-            // grant, so the process would launch with a grant silently missing.
-            // Fail rather than proceed. sandbox_config.py constrains mode to a
-            // Literal, so reaching here means the two sides have drifted.
+            // Unrecognised mode: fail rather than launch with a grant silently missing;
+            // sandbox_config.py's Literal type means reaching here means the two sides drifted.
             return fail_dacl("unrecognised broker_file mode '"
                                  + to_utf8(bf.mode) + "'",
                              bf.path, "CONFIG");
         }
     }
 
-    // Independent of the broker_files loop above: capture_target_stdout is
-    // its own opt-in signal, never inferred from a broker_file entry or its
-    // mode, so this cannot silently affect a caller who doesn't set it.
-    // This pipe is entirely separate from the host's own stdout (used by
-    // emit_error/JsonOut for the JSON handshake protocol below); nothing
-    // here touches that stream.
+    // capture_target_stdout is its own opt-in signal, never inferred from a
+    // broker_file entry, so it cannot silently affect a caller who doesn't set it.
+    //
+    // This pipe is entirely separate from the host's own stdout, used by
+    // emit_error/JsonOut for the JSON handshake protocol; nothing here touches that stream.
     HANDLE target_stdout_read  = nullptr;
     HANDLE target_stdout_write = nullptr;
     HANDLE target_stdin        = nullptr;
@@ -474,12 +455,8 @@ static int run_launch(const LaunchConfig& cfg) {
                        "CreatePipe (target stdout) failed (" + hex32(GetLastError()) + ")");
             return 1;
         }
-        // The host's own end must not be inheritable: CreateProcessW below
-        // only inherits handles named in inherit_handles (via
-        // PROC_THREAD_ATTRIBUTE_HANDLE_LIST), so this alone would not leak
-        // the read end to the target, but clearing it here means a future
-        // child launched some other way from this same host process
-        // couldn't pick it up either.
+        // The host's own end must not be inheritable, so a future child launched
+        // some other way from this host process can't pick it up either.
         if (!SetHandleInformation(target_stdout_read, HANDLE_FLAG_INHERIT, 0)) {
             CloseHandle(target_stdout_write);
             close_target_stdout_read();
@@ -490,8 +467,7 @@ static int run_launch(const LaunchConfig& cfg) {
         }
 
         // A defined, empty stdin rather than an unset one: STARTF_USESTDHANDLES
-        // requires all three standard handles once set, and NUL gives the
-        // target well-defined EOF-on-read behaviour instead of an invalid handle.
+        // requires all three handles once set, and NUL gives well-defined EOF-on-read.
         SECURITY_ATTRIBUTES nul_sa = {};
         nul_sa.nLength        = sizeof(nul_sa);
         nul_sa.bInheritHandle = TRUE;
@@ -507,10 +483,8 @@ static int run_launch(const LaunchConfig& cfg) {
             return 1;
         }
 
-        // Rides the same PROC_THREAD_ATTRIBUTE_HANDLE_LIST and the same
-        // close_inherit_handles() cleanup after CreateProcessW as
-        // broker_files "inherit" entries, without adding a SANDBOX_HANDLE_N
-        // env var: that convention is specific to those entries.
+        // Rides the same PROC_THREAD_ATTRIBUTE_HANDLE_LIST and close_inherit_handles()
+        // cleanup as broker_files "inherit" entries, but without a SANDBOX_HANDLE_N env var.
         inherit_handles.push_back(target_stdout_write);
         inherit_handles.push_back(target_stdin);
     }
@@ -539,9 +513,8 @@ static int run_launch(const LaunchConfig& cfg) {
     LPCWSTR working_dir = cfg.working_dir.empty() ? nullptr
                                                   : cfg.working_dir.c_str();
 
-    // ProcThreadAttrList rebuilds and re-checks the attribute list on every
-    // call, so the breakaway retry below reuses this exact path instead of a
-    // separate unchecked copy of it.
+    // ProcThreadAttrList rebuilds and re-checks the attribute list on every call,
+    // so the breakaway retry below reuses this exact path instead of a separate copy.
     auto create_sandboxed = [&](bool breakaway,
                                 PROCESS_INFORMATION& out_pi,
                                 std::string& err) -> bool {
@@ -555,9 +528,8 @@ static int run_launch(const LaunchConfig& cfg) {
         si.lpAttributeList         = attrs.get();
 
         if (cfg.capture_target_stdout) {
-            // Fully separate from the host's own stdout (STARTUPINFO here
-            // describes the target, not this host process); the host's own
-            // JSON handshake stream is untouched by this.
+            // Fully separate from the host's own stdout: STARTUPINFO here describes
+            // the target, not this host process, so the JSON handshake stream is untouched.
             si.StartupInfo.dwFlags   |= STARTF_USESTDHANDLES;
             si.StartupInfo.hStdInput  = target_stdin;
             si.StartupInfo.hStdOutput = target_stdout_write;
@@ -623,28 +595,22 @@ static int run_launch(const LaunchConfig& cfg) {
         close_target_stdout_read();
         close_inherit_handles();
         // Embeds the HRESULT so an out-of-range cpu_min_rate/cpu_max_rate
-        // (E_INVALIDARG) reads as distinct from a SetInformationJobObject
-        // Win32 failure.
+        // (E_INVALIDARG) reads as distinct from a SetInformationJobObject failure.
         emit_error("JOB_ASSIGN",
                    "JobObject::apply_limits failed ("
                        + hex32(static_cast<DWORD>(hr_apply_limits)) + ")");
         return 1;
     }
 
-    // ERROR_ACCESS_DENIED from AssignProcessToJobObject signals that the
-    // process sits in a job forbidding a second assignment. That is the one
-    // condition the breakaway relaunch clears. Mirrors the error-5 retry
-    // trigger in job.py::add_process.
+    // ERROR_ACCESS_DENIED from AssignProcessToJobObject signals a job forbidding
+    // a second assignment, the one condition the breakaway relaunch clears.
     //
-    // Do not widen this to IsProcessInJob(h, nullptr, ...): that is true
-    // for essentially every process on Windows 11. The retry would then
-    // fire unconditionally, and every launch would create, terminate, and
-    // re-create the child even when the first assignment would have
-    // succeeded.
+    // Do not widen this to IsProcessInJob(h, nullptr, ...): that's true for
+    // essentially every process on Windows 11, so the retry would fire
+    // unconditionally and every launch would recreate the child needlessly.
     //
-    // cfg.breakaway is re-checked because a retry would use identical
-    // flags and cannot help. Aborting beats launching the same process
-    // twice.
+    // cfg.breakaway is re-checked because a retry would use identical flags and
+    // cannot help; aborting beats launching the same process twice.
     HRESULT hr_assign = job.assign(pi.hProcess);
     if (hr_assign == HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED) && !cfg.breakaway) {
         kill_process();
@@ -669,10 +635,8 @@ static int run_launch(const LaunchConfig& cfg) {
     // Close our inheritable copies. The child holds inherited duplicates.
     close_inherit_handles();
 
-    // A ResumeThread failure leaves the target permanently suspended.
-    // stage="started" has not been emitted yet, so this is fatal here
-    // rather than reported as a successful start. Matches
-    // SandboxProcess.resume() on the native path.
+    // A ResumeThread failure leaves the target permanently suspended; since
+    // stage="started" hasn't been emitted yet, this is fatal here, not a successful start.
     DWORD resume_result = ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
     if (resume_result == static_cast<DWORD>(-1)) {
@@ -684,15 +648,12 @@ static int run_launch(const LaunchConfig& cfg) {
         return 1;
     }
 
-    // Hands Python a handle to this exact process instead of a pid it
-    // would have to reopen later. The target is a deliberate crash
-    // boundary, so a bare pid can be reused by an unrelated process in
-    // the window before Python opens it. A duplicated handle has no such
-    // window. It is a direct reference to this process object, not a
-    // lookup by an identifier Windows can recycle.
+    // Hands Python a handle to this exact process instead of a pid it would have
+    // to reopen later. A bare pid can be reused by an unrelated process in the
+    // window before Python opens it, but a duplicated handle has no such window.
     //
-    // Access is scoped to what SandboxProcess and WindowsJobObject
-    // actually call on it: terminate, poll/wait, and job assignment.
+    // Access is scoped to what SandboxProcess and WindowsJobObject actually call
+    // on it: terminate, poll/wait, and job assignment.
     HANDLE parent_for_dup = OpenProcess(PROCESS_DUP_HANDLE, FALSE, cfg.parent_pid);
     if (!parent_for_dup) {
         std::string err = "OpenProcess(parent, PROCESS_DUP_HANDLE) failed ("
@@ -733,15 +694,12 @@ static int run_launch(const LaunchConfig& cfg) {
         .dump() << "\n";
     std::cout.flush();
 
-    // The parent handle is opened once, before the thread starts. The wait
-    // is then on this exact process object rather than re-resolving
-    // parent_pid on every poll: a PID Windows could reassign to an
-    // unrelated process.
+    // The parent handle is opened once, before the thread starts, so the wait is
+    // on this exact process object rather than re-resolving a PID Windows could
+    // reassign to an unrelated process.
     //
-    // "started" was already reported to Python above, so a watchdog setup
-    // failure cannot abort the launch. The child is running and Python
-    // depends on it. Setup failure degrades to a direct wait on the
-    // child, losing only prompt teardown when the parent dies.
+    // "started" was already reported to Python above, so a watchdog setup failure
+    // can't abort the launch; it degrades to a direct wait on the child, losing only prompt teardown.
     HANDLE parent_handle = OpenProcess(SYNCHRONIZE, FALSE, cfg.parent_pid);
     HANDLE done_event    = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     bool watchdog_usable = (parent_handle != nullptr) && (done_event != nullptr);
@@ -765,14 +723,12 @@ static int run_launch(const LaunchConfig& cfg) {
     Watchdog watchdog(parent_handle, done_event);
     if (watchdog_usable) watchdog.start();
 
-    // Started here, not earlier: the target has been runnable since
-    // ResumeThread above, but nothing between there and here depends on it
-    // making progress, so a full pipe only stalls the target transiently
-    // rather than deadlocking the host. Started here, not later (e.g. only
-    // after the wait below): waiting until after the wait would mean the
-    // target could fill the pipe and block on WriteFile before any reader
-    // exists, which the wait below cannot detect or unblock, hanging both
-    // sides.
+    // Nothing between ResumeThread above and here depends on the target making progress, so a full pipe only stalls it
+    // transiently rather than deadlocking the host.
+    //
+    // Started here, not later (e.g. after the wait below): the target could
+    // otherwise fill the pipe and block on WriteFile before any reader exists,
+    // hanging both sides with no way for the wait below to detect or unblock it.
     std::string target_output_buf;
     std::thread target_output_thread;
     if (cfg.capture_target_stdout) {
@@ -782,11 +738,7 @@ static int run_launch(const LaunchConfig& cfg) {
             while (ReadFile(target_stdout_read, chunk, sizeof(chunk), &n, nullptr) && n > 0) {
                 target_output_buf.append(chunk, n);
             }
-            // ReadFile failing here (typically ERROR_BROKEN_PIPE, once
-            // every write handle is gone: the host's own copy was already
-            // closed by close_inherit_handles() above, and the target's
-            // inherited copy closes when it exits) is ordinary EOF for an
-            // anonymous pipe, not a real error worth reporting.
+            // ReadFile failing here is ordinary pipe EOF, not a real error.
         });
     }
 
@@ -816,15 +768,13 @@ static int run_launch(const LaunchConfig& cfg) {
     if (done_event) CloseHandle(done_event);
 
     if (cfg.capture_target_stdout) {
-        // NOTE: if wait_result resolved via done_event (parent death) rather
-        // than pi.hProcess (target exit), the target may still be running
-        // here, still holding its inherited copy of the write end open.
-        // This join then blocks until the target actually exits (via this
-        // job's KILL_ON_JOB_CLOSE once this host process itself goes away,
-        // which cannot happen while blocked here) or writes enough for
-        // ReadFile to return, whichever comes first. Not resolved: a bounded
-        // wait with a forced CloseHandle(target_stdout_read) fallback would
-        // fix it but was not built here.
+        // NOTE: if wait_result resolved via done_event (parent death) rather than
+        // pi.hProcess (target exit), the target may still be running here, holding
+        // its inherited write end open. This join then blocks until the target
+        // exits or writes enough for ReadFile to return.
+        //
+        // Not resolved: a bounded wait with a forced CloseHandle(target_stdout_read)
+        // fallback would fix a stall here but was not built.
         target_output_thread.join();
         close_target_stdout_read();
     }
@@ -847,9 +797,8 @@ static int run_launch(const LaunchConfig& cfg) {
 
 int main(int argc, char* argv[]) {
     if (argc == 3 && std::string(argv[1]) == "--reset") {
-        // This mode has no JSON stdout protocol to report through, so a throw
-        // out of run_reset() is caught locally and reported to stderr rather
-        // than reaching std::terminate().
+        // This mode has no JSON stdout protocol to report through, so a throw out
+        // of run_reset() is caught locally and reported to stderr instead of reaching std::terminate().
         try {
             return run_reset(argv[2]);
         } catch (const std::exception& ex) {

@@ -13,9 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 # Side-effect import: registers argtypes/restype for the kernel32 functions
-# used below (OpenEventW, WaitForSingleObject, CloseHandle) on the shared
-# ctypes.windll.kernel32 singleton. See win32_types.py's "kernel32 function
-# signatures" section for why this must be imported before those calls run.
+# used below (OpenEventW, WaitForSingleObject, CloseHandle) before they're called.
 from . import win32_types as _win32_types  # noqa: F401
 from .sandbox_config import BrokerFile, SandboxConfig
 from .sandbox_error import SandboxError
@@ -63,13 +61,8 @@ def _build_stdin_payload(config: SandboxConfig) -> dict:
 def _kill_and_drain(proc: subprocess.Popen) -> str:
     """Kill *proc* and drain its pipes.
 
-    Used by launch() to clean up the host once any exception aborts the
-    launch after the child has spawned.
-
-    The host may have already provisioned the AppContainer and resumed
-    the target process before the exception occurred. Without this, the
-    host would keep running untracked, and its stderr pipe would go
-    unread, risking a fill-and-block if it ever writes enough to it.
+    Used when launch() aborts after the host has spawned; without this the
+    host keeps running untracked and can block writing to an unread stderr pipe.
 
     Returns the decoded stderr text, or an empty string if there is none.
     """
@@ -86,9 +79,8 @@ def _kill_and_drain(proc: subprocess.Popen) -> str:
 def _drain_stderr(proc: subprocess.Popen) -> None:
     """Read and discard the host's stderr until it closes.
 
-    Runs for the life of a successfully launched host. Without this nothing
-    reads that pipe, so a long-lived host blocks on write once the OS pipe
-    buffer fills.
+    Runs for the life of a successfully launched host; without this nothing
+    reads its pipe, so it blocks writing once the OS pipe buffer fills.
     """
     try:
         for line in iter(proc.stderr.readline, b""):
@@ -99,14 +91,12 @@ def _drain_stderr(proc: subprocess.Popen) -> None:
         pass
 
 
-# DWORD-sized for win32 PID but Windows never actually assigns process IDs 
-# anywhere near the top of that range. This is a sanity check against a corrupted/malicious 
-# value, not a real limit.
+# DWORD-sized for win32 PID; Windows never assigns PIDs anywhere near the top
+# of that range, so this is a sanity check against a corrupted/malicious value, not a real limit.
 _MAX_SANE_PID = 0x7FFFFFFF
 
-# Upper bound for a duplicated Win32 HANDLE value (pointer-sized on x64).
-# Same sanity-check role as _MAX_SANE_PID: not a real limit, just a guard
-# against a corrupted/malicious value being used directly as a HANDLE.
+# Upper bound for a duplicated Win32 HANDLE value (pointer-sized on x64);
+# a sanity check against a corrupted/malicious value, not a real limit.
 _MAX_SANE_HANDLE = 0xFFFFFFFFFFFFFFFF
 
 # How long launch() waits for the host's handshake line on stdout before
@@ -153,9 +143,8 @@ class SandboxHandle:
     broker_files: list[BrokerFile] = field(default_factory=list)
     should_revert_grants: bool = False
     capture_target_stdout: bool = False
-    # Populated by _watch_event() once the host's final "exited" JSON line is
-    # read, only when capture_target_stdout was set at launch. Stays None if
-    # capture_target_stdout was False, or if reading/parsing that line fails.
+    # Populated by _watch_event() from the host's final "exited" JSON line, only
+    # when capture_target_stdout was set; stays None otherwise or if parsing fails.
     target_output: str | None = field(default=None, compare=False, hash=False)
     _callbacks: dict[SandboxEvent, list[Callable[[SandboxPayload], None]]] = field(
         default_factory=lambda: defaultdict(list),
@@ -172,9 +161,8 @@ class SandboxHandle:
     _process_handle_lock: threading.Lock = field(
         default_factory=threading.Lock, compare=False, hash=False, repr=False
     )
-    # STARTED always happens before the caller can possibly have a handle to
-    # register a listener on, so it is stashed here instead of dispatched via
-    # _fire(), and replayed to each callback as it registers in on().
+    # STARTED always fires before the caller can have a handle to listen on, so
+    # it's stashed here and replayed to each callback as it registers in on().
     _started_payload: SandboxPayload | None = field(default=None, compare=False, hash=False)
 
     def on(
@@ -194,9 +182,8 @@ class SandboxHandle:
             if not cleanup_future.done():
                 loop.call_soon_threadsafe(cleanup_future.set_result, None)
 
-        # Register the callback BEFORE inspecting _cleaned_up so that a
-        # CLEANED_UP event fired between registration and the check below
-        # still resolves the future via the callback, not just the check.
+        # Registered before inspecting _cleaned_up so a CLEANED_UP event that fires
+        # between registration and the check below still resolves the future.
         self.on(SandboxEvent.CLEANED_UP, _on_cleaned_up)
 
         if self._cleaned_up:
@@ -206,9 +193,8 @@ class SandboxHandle:
                 cleanup_future.set_result(None)
         elif self._proc and self._proc.poll() is None:
             self._proc.terminate()
-            # No further wait needed here: the watcher's proc.poll() fallback
-            # (see _watch_event) already detects this exit and fires
-            # CLEANED_UP, which is what cleanup_future below resolves on.
+            # No further wait needed. The watcher's proc.poll() fallback already
+            # detects this exit and fires CLEANED_UP, which resolves cleanup_future.
 
         await cleanup_future
 
@@ -230,15 +216,11 @@ async def _watch_event(
 
     loop = asyncio.get_event_loop()
 
-    # Parked here, before any wait below, not only once the process has
-    # already exited: main.cpp's final "exited" JSON line (which carries
-    # target_output when capture_target_stdout is set) can be large, and if
-    # nothing is reading this pipe while the host writes it, a write past
-    # the OS pipe buffer blocks the host inside WriteFile before it can ever
-    # signal h_event or exit, hanging every wait below forever. Only started
-    # when the caller opted in, so callers who read handle._proc.stdout
-    # themselves (e.g. wincage.checker, which does not set this flag) see no
-    # new reader on that stream.
+    # Started here, before any wait below. If nothing reads this pipe while the
+    # host writes its large final "exited" line, the write blocks the host inside
+    # WriteFile before it can ever signal completion, hanging every wait forever.
+    # Only started when capture_target_stdout is set, so other readers of
+    # handle._proc.stdout (e.g. wincage.checker) see no competing reader.
     target_output_future: asyncio.Future[bytes] | None = None
     if handle.capture_target_stdout and proc.stdout is not None:
         target_output_future = loop.run_in_executor(None, proc.stdout.readline)
@@ -272,11 +254,9 @@ async def _watch_event(
             error=error_reason,
             stage=SandboxStage.WATCHDOG,
         ))
-        # Without the named event we can't wait for the host's own signal, but
-        # we can still fall back to a direct wait on the process itself so
-        # EXITED/CLEANED_UP fire regardless. SandboxHandle.terminate() awaits a
-        # cleanup_future that only ever resolves via CLEANED_UP, returning
-        # here without firing it would let terminate() hang forever.
+        # Without the named event, fall back to a direct wait on the process itself
+        # so EXITED/CLEANED_UP still fire and terminate() awaits a future that only
+        # resolves via CLEANED_UP. So skipping it would hang terminate() forever.
         loop = asyncio.get_event_loop()
         rc = await loop.run_in_executor(None, proc.wait)
         await _resolve_target_output()
@@ -312,9 +292,8 @@ async def _watch_event(
             if result != WAIT_TIMEOUT:
                 break
             if proc.poll() is not None:
-                # The host exited without signaling h_event. A hard host
-                # crash looks exactly like this, so this is the only way
-                # to detect it.
+                # The host exited without signaling h_event; a hard host crash
+                # looks exactly like this, so this is the only way to detect it.
                 break
 
         rc = proc.wait()
@@ -350,10 +329,8 @@ async def _watch_event(
 def _revert_grants_if_configured(handle: SandboxHandle) -> None:
     """Best-effort revoke_grants() call for should_revert_grants at CLEANED_UP.
 
-    revoke_grants is a module-level function defined later in this file;
-    that's fine since this only runs after the module has fully loaded.
-    Exceptions are logged, not raised, so a revoke failure never blocks the
-    rest of cleanup or leaves SandboxHandle.terminate() hanging.
+    Exceptions are logged instead of raised so a revoke failure never blocks
+    cleanup or leaves SandboxHandle.terminate() hanging.
     """
     if not (handle.should_revert_grants and handle.broker_files):
         return
@@ -376,14 +353,11 @@ def _fire(
     # callback re-enters _fire or inspects _cleaned_up synchronously.
     if event == SandboxEvent.CLEANED_UP:
         handle._cleaned_up = True
-        # Only true for direct launch() callers still holding the handle.
-        # process.py's container path nulls this out itself once it hands
-        # the handle to a SandboxProcess, which owns and closes it instead.
+        # Only true for direct launch() callers; process.py's container path
+        # nulls this out itself once ownership passes to a SandboxProcess.
         #
-        # Lock scope stops at the close+null, released before the callback
-        # loop below runs. Callbacks are user-supplied and could themselves
-        # touch process_handle; Lock is not reentrant, so holding it across
-        # that loop would risk a self-deadlock.
+        # Lock releases before the callback loop below. callbacks are
+        # consumer passed in, so holding it there risks a self-deadlock.
         with handle._process_handle_lock:
             if handle.process_handle is not None:
                 ctypes.windll.kernel32.CloseHandle(handle.process_handle)
@@ -427,9 +401,8 @@ def _write_handshake(proc: subprocess.Popen, config: SandboxConfig) -> None:
     Closes stdin after writing so the host sees EOF. Raises SandboxError
     if the write fails.
     """
-    # ensure_ascii=False so non-ASCII path characters survive as raw UTF-8
-    # across the C++ boundary. json_parse.h copies non-escape bytes verbatim,
-    # so \uXXXX escapes (the ensure_ascii=True default) would corrupt them.
+    # ensure_ascii=False so non-ASCII path characters survive as raw UTF-8;
+    # json_parse.h copies bytes verbatim, so \uXXXX escapes would corrupt them.
     stdin_data = json.dumps(_build_stdin_payload(config), ensure_ascii=False).encode()
     try:
         proc.stdin.write(stdin_data)
@@ -519,10 +492,8 @@ def _validate_handshake_response(response: dict) -> int:
         )
 
     if response.get("stage") == "error":
-        # error_stage comes from the child's JSON and is not trusted.
-        # SandboxStage[...] raises KeyError on anything that is not an
-        # exact member name, which would escape as an unhandled
-        # exception instead of the SandboxError this function promises.
+        # error_stage comes from the child's JSON and isn't trusted. SandboxStage[...]
+        # raises KeyError on any non-member name, which the try/except below catches.
         error_stage_raw = str(response.get("error_stage", "PROCESS_CREATE")).upper()
         try:
             error_stage = SandboxStage[error_stage_raw]
@@ -534,13 +505,10 @@ def _validate_handshake_response(response: dict) -> int:
             suggestions=response.get("suggestions", []),
         )
 
-    # response["pid"] is child-controlled. It reaches
-    # OpenProcess(PROCESS_ALL_ACCESS, ...) plus Job Object assignment
-    # with KILL_ON_JOB_CLOSE (see process.py's run_under_job). A
-    # wrong-but-plausible integer would be destructive to an unrelated
-    # process.
-    #
-    # Range check does not close the PID-reuse race.
+    # response["pid"] is child-controlled and reaches OpenProcess(PROCESS_ALL_ACCESS,
+    # ...) plus Job Object assignment with KILL_ON_JOB_CLOSE. A wrong-but-plausible
+    # integer would be destructive to an unrelated process. This range check alone
+    # does not close the PID-reuse race.
     pid = response["pid"]
     if isinstance(pid, bool) or not isinstance(pid, int) or not (0 < pid <= _MAX_SANE_PID):
         raise SandboxError(
@@ -575,10 +543,8 @@ def _build_sandbox_handle(
 ) -> SandboxHandle:
     """Build the SandboxHandle for a launched host.
 
-    Registers an ERROR listener that logs, so an ERROR event is never
-    silently dropped for lack of a callback.
-
-    Returns the new handle.
+    Registers an ERROR listener that logs, so ERROR events are never
+    silently dropped. Returns the new handle.
     """
     handle = SandboxHandle(
         moniker=config.moniker,
@@ -601,11 +567,8 @@ def _build_sandbox_handle(
         stage=None,
     )
 
-    # Without a listener, an ERROR payload (e.g. OpenEventW failing in
-    # the watcher thread) is dispatched to zero callbacks and
-    # effectively swallowed. Registered before the watcher thread
-    # starts so it's always present by the time _watch_event could
-    # fire ERROR.
+    # Registered before the watcher thread starts so it's always present
+    # by the time _watch_event could fire ERROR.
     def _log_sandbox_error(payload: SandboxPayload) -> None:
         logger.error(
             "Sandbox ERROR event: moniker=%s pid=%s stage=%s error=%s",
@@ -636,9 +599,8 @@ def _start_background_threads(
                 _watch_event(response["event_name"], handle, proc)
             )
         finally:
-            # loop.close() alone does not drain the default executor that
-            # run_in_executor(None, ...) lazily creates in _watch_event();
-            # without this, its worker thread leaks past this function's exit.
+            # loop.close() alone doesn't drain the default executor that
+            # run_in_executor(None, ...) lazily creates; without this its worker thread leaks.
             loop.run_until_complete(loop.shutdown_default_executor())
             loop.close()
 
@@ -650,11 +612,8 @@ def launch(config: SandboxConfig) -> SandboxHandle:
 
     proc = _spawn_host(_exe())
 
-    # Any exception must still clean up proc. success stays
-    # False until the handle is fully built and its background threads are
-    # running
-    # 
-    # The `finally` block below covers every exception type for our case
+    # success stays False until the handle and its background threads are fully
+    # up; the finally block below cleans up proc for any exception before that.
     success = False
     try:
         _write_handshake(proc, config)
@@ -771,8 +730,8 @@ def revoke_grants(moniker: str, broker_files: list[BrokerFile]) -> None:
     if proc.returncode != 0:
         response = _parse_error_response(proc.stdout)
         if response is not None and response.get("stage") == "error":
-            # error_stage comes from the child's JSON and is not trusted; see
-            # the identical guard in _validate_handshake_response.
+            # error_stage comes from the child's JSON and isn't trusted: SandboxStage[...]
+            # raises KeyError on any non-member name, which the try/except below catches.
             error_stage_raw = str(response.get("error_stage", "DACL_REVOKE")).upper()
             try:
                 error_stage = SandboxStage[error_stage_raw]

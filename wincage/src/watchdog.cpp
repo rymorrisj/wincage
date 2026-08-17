@@ -32,7 +32,6 @@ void Watchdog::monitor_loop() {
         // parent_handle_ signaled: the parent process has exited.
         SetEvent(done_event_);
     }
-    // WAIT_OBJECT_0 + 1 (cancel_event_) or WAIT_FAILED: normal shutdown or
-    // an unexpected wait error. Either way don't signal done_event; the
-    // caller's own wait on the child process handle remains authoritative.
+    // WAIT_OBJECT_0 + 1 (cancel_event_) or WAIT_FAILED: don't signal done_event
+    // either way. The caller's own wait on the child process handle remains authoritative.
 }

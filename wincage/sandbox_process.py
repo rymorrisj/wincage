@@ -61,12 +61,8 @@ class SandboxProcess:
             self._process_handle, ctypes.byref(exit_code)
         )
         if not ok:
-            # The BOOL return says whether the DWORD out-param is meaningful
-            # at all. On failure exit_code still holds the pre-set _STILL_ACTIVE.
-            #
-            # Report unknown (None) rather than implicitly alive. Leave
-            # returncode and the handles untouched as the process may or
-            # may not have exited.
+            # The BOOL return says whether exit_code is meaningful; on failure it still
+            # holds the pre-set _STILL_ACTIVE, so report unknown (None) rather than implicitly alive.
             _log.error(
                 "GetExitCodeProcess failed for pid=%s (GetLastError=%s); "
                 "process exit state unknown.",
@@ -74,10 +70,8 @@ class SandboxProcess:
             )
             return None
         if exit_code.value == _STILL_ACTIVE:
-            # 259 is ambiguous. GetExitCodeProcess reports it both while the
-            # process is still running and when it legitimately exited with
-            # real exit code 259. Disambiguate with a non-blocking wait on
-            # the handle itself.
+            # 259 (_STILL_ACTIVE) is ambiguous: GetExitCodeProcess reports it both while
+            # running and when the real exit code is 259, so disambiguate with a non-blocking wait.
             _WAIT_TIMEOUT = 0x00000102
             wait_result = ctypes.windll.kernel32.WaitForSingleObject(
                 self._process_handle, ctypes.wintypes.DWORD(0)
@@ -105,13 +99,9 @@ class SandboxProcess:
     def wait(self, timeout_ms: int = 10_000) -> int:
         """Wait up to *timeout_ms* milliseconds for the process to exit.
 
-        Returns the exit code, or -1 if the process is still running when
-        the timeout elapses.
-
-        Handles close only once the exit is confirmed. On a timeout the
-        process is still alive, so the handle stays open for a later
-        poll(), wait(), or terminate() call.
-        Callers that need to guarantee termination should call kill() first.
+        Returns the exit code, or -1 on timeout, in which case the handle
+        stays open for a later poll(), wait(), or terminate() call. Callers
+        that need to guarantee termination should call kill() first.
         """
         _WAIT_TIMEOUT = 0x00000102
         if self._process_handle:
@@ -135,13 +125,10 @@ class SandboxProcess:
     def resume(self) -> None:
         """Resume the suspended main thread using the stored thread handle.
 
-        Uses the thread handle from ``PROCESS_INFORMATION`` returned by
-        ``CreateProcessW``, no thread snapshot required.  The thread
-        handle is closed immediately after the resume call.
+        Closes the thread handle immediately after the resume call.
 
         Raises:
-            RuntimeError: If the thread handle is already closed or
-                ``ResumeThread`` reports failure.
+            RuntimeError: thread handle already closed, or ResumeThread failed.
         """
         if not self._thread_handle:
             raise RuntimeError(

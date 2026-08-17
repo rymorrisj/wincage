@@ -32,12 +32,6 @@ HRESULT JobObject::apply_limits(const JobConfig& cfg) {
     if (!handle_) return E_HANDLE;
 
     if (!cfg.skip_cpu_limit) {
-        // sandbox.py::_validate() already enforces this range, but the WORD
-        // packing below has no bounds check of its own: an out-of-range value
-        // reaching here would truncate into a wrong CPU cap instead of failing.
-        //
-        // _validate() also rejects cpu_min_rate > cpu_max_rate. That is not
-        // re-checked here.
         if (cfg.cpu_min_rate < 1 || cfg.cpu_min_rate > 100 ||
             cfg.cpu_max_rate < 1 || cfg.cpu_max_rate > 100) {
             return E_INVALIDARG;
@@ -45,18 +39,16 @@ HRESULT JobObject::apply_limits(const JobConfig& cfg) {
 
         JOBOBJECT_CPU_RATE_CONTROL_INFORMATION cpu = {};
 #ifdef JOB_OBJECT_CPU_RATE_CONTROL_MIN_MAX_RATE
-        // MIN_MAX_RATE requires Windows 10+ SDK headers.
-        // Pack MinRate (low word) and MaxRate (high word) into the CpuRate
-        // field. MinGW UCRT64 headers expose only CpuRate in the union.
+        // MIN_MAX_RATE requires Windows 10+ SDK headers; pack MinRate (low word) and
+        // MaxRate (high word) into CpuRate, since MinGW UCRT64 headers expose only that field.
         cpu.ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE |
                            JOB_OBJECT_CPU_RATE_CONTROL_MIN_MAX_RATE;
         WORD min_w = static_cast<WORD>(cfg.cpu_min_rate * 100);
         WORD max_w = static_cast<WORD>(cfg.cpu_max_rate * 100);
         cpu.CpuRate = (static_cast<DWORD>(max_w) << 16) | static_cast<DWORD>(min_w);
 #else
-        // JOB_OBJECT_CPU_RATE_CONTROL_MIN_MAX_RATE is not available in this MinGW
-        // installation (requires Windows 10+ SDK headers). Fall back to HARD_CAP.
-        // MinRate will not be enforced in this build; only MaxRate (cpu_max_rate) applies.
+        // JOB_OBJECT_CPU_RATE_CONTROL_MIN_MAX_RATE isn't available in this MinGW
+        // installation, so fall back to HARD_CAP; MinRate will not be enforced in this build.
 #pragma message("sandbox: JOB_OBJECT_CPU_RATE_CONTROL_MIN_MAX_RATE unavailable; HARD_CAP fallback active, MinRate scheduling floor will not be enforced")
         cpu.ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE |
                            JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
@@ -73,12 +65,10 @@ HRESULT JobObject::apply_limits(const JobConfig& cfg) {
     if (!cfg.skip_memory_limit && cfg.memory_limit_bytes > 0) {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION eli = {};
         // This call replaces the whole extended-limit structure, so create()'s
-        // flags must be repeated here or they are lost.
+        // KILL_ON_JOB_CLOSE flag must be repeated here or it's lost.
         //
-        // PROCESS_MEMORY to match job.py's set_memory_limit()
-        // on the Job-Object-only launch path. memory_limit_mb caps each
-        // process individually. JOB_MEMORY would cap the job's cumulative
-        // usage instead
+        // PROCESS_MEMORY caps each process individually, matching job.py's native
+        // path. JOB_MEMORY would cap the job's cumulative usage instead.
         eli.BasicLimitInformation.LimitFlags =
             JOB_OBJECT_LIMIT_PROCESS_MEMORY |
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;

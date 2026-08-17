@@ -7,10 +7,8 @@
 
 namespace {
 
-// True if acl already carries an ACCESS_ALLOWED ACE for sid granting at
-// least access_mask, with both OBJECT_INHERIT_ACE and CONTAINER_INHERIT_ACE
-// set. grant_directory uses this to skip its recursive tree walk once a
-// prior launch has already propagated the grant.
+// True if acl already carries an ACCESS_ALLOWED ACE for sid granting at least
+// access_mask with both OBJECT_INHERIT_ACE and CONTAINER_INHERIT_ACE set.
 bool has_full_inheritable_ace(PACL acl, PSID sid, DWORD access_mask) {
     if (!acl || !sid) return false;
 
@@ -39,11 +37,9 @@ bool has_full_inheritable_ace(PACL acl, PSID sid, DWORD access_mask) {
     return false;
 }
 
-// The container gets enough access to create and
-// draw its own window and receive its own input. It does not get hooks,
-// journal record/playback, switch desktop, clipboard, or screen capture
-// rights. Those reach every other process and window on the desktop, not
-// just this one, and would defeat the point of confining it.
+// The container gets enough access to create/draw its own window and receive
+// its own input, but not hooks, journal record/playback, switch desktop,
+// clipboard, or screen capture, since those reach every process on the desktop.
 constexpr DWORD kDesktopAccessMask =
     DESKTOP_CREATEWINDOW | DESKTOP_CREATEMENU | DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS;
 constexpr DWORD kWindowStationAccessMask =
@@ -87,9 +83,8 @@ DWORD apply_ace_to_node(const std::wstring& path, EXPLICIT_ACCESS_W& ea) {
     return err;
 }
 
-// TreeSetNamedSecurityInfoW can't be told to stop at a junction or
-// symlink, so it would propagate this ACE across it. Walk the tree
-// ourselves and skip reparse points instead.
+// TreeSetNamedSecurityInfoW can't be told to stop at a junction or symlink,
+// so it would propagate this ACE across it
 DWORD grant_tree_skip_reparse_points(const std::wstring& path, EXPLICIT_ACCESS_W& ea) {
     DWORD err = apply_ace_to_node(path, ea);
     if (err != ERROR_SUCCESS) return err;
@@ -209,9 +204,8 @@ HRESULT AppContainer::grant_window_station() {
         return ok ? S_OK : HRESULT_FROM_WIN32(GetLastError());
     };
 
-    // Neither handle below is closed. GetProcessWindowStation and
-    // GetThreadDesktop return the caller's existing objects, not new
-    // references, so closing them would tear down this process's own station.
+    // Neither handle below is closed: GetProcessWindowStation and GetThreadDesktop
+    // return the caller's existing objects. Closing them would tear down this process's own station.
     HWINSTA hwinsta = GetProcessWindowStation();
     if (!hwinsta) return HRESULT_FROM_WIN32(GetLastError());
     HRESULT hr = grant_obj(hwinsta, kWindowStationAccessMask);
@@ -281,13 +275,12 @@ HRESULT AppContainer::grant_directory(const std::wstring& path, DWORD access_mas
     );
     if (err != ERROR_SUCCESS) return HRESULT_FROM_WIN32(err);
 
-    // A prior launch may have already granted and propagated this exact ACE
-    // (same SID, same access_mask, same inheritance flags) to path and
-    // everything under it. Walking the tree again is expensive, so skip it
-    // once the root node shows the grant already took.
+    // A prior launch may have already granted this exact ACE (same SID, mask,
+    // inheritance flags) to the whole tree; skip the expensive walk once the
+    // root node shows it already took.
     //
     // A marker from a prior interrupted walk means the root's ACE alone
-    // doesn't prove the tree is fully granted, so skip the fast path.
+    // doesn't prove the full tree is granted, so skip the fast path then.
     bool already_granted = !grant_marker_present(path)
         && has_full_inheritable_ace(existing_acl, sid_, access_mask);
     if (sd) LocalFree(sd);
@@ -321,10 +314,7 @@ HRESULT AppContainer::derive_sid() {
 namespace {
 
 // True if acl carries any ACCESS_ALLOWED ACE for sid, regardless of mask or
-// inheritance flags. revoke_directory's fast path is the mirror image of
-// grant_directory's has_full_inheritable_ace: grant_directory treats "root
-// already has the full grant" as done, revoke_directory treats "root has no
-// grant left at all" as done.
+// inheritance flags.
 bool has_ace_for_sid(PACL acl, PSID sid) {
     if (!acl || !sid) return false;
 
@@ -409,10 +399,9 @@ HRESULT AppContainer::revoke_directory(const std::wstring& path) {
     if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) return S_OK;
     if (err != ERROR_SUCCESS) return HRESULT_FROM_WIN32(err);
 
-    // Same crash-safety marker grant_directory uses, read the same way: a
-    // marker left behind by an interrupted walk (grant's or revoke's, it
-    // doesn't matter which) means the root's current ACE state doesn't prove
-    // the whole tree matches it, so the fast path below must not trust it.
+    // A marker left behind by an interrupted walk, grant's or revoke's, means
+    // the root's current ACE state doesn't prove the whole tree matches it,
+    // so the fast path below must not trust it.
     bool already_revoked = !grant_marker_present(path)
         && !has_ace_for_sid(existing_acl, sid_);
     if (sd) LocalFree(sd);

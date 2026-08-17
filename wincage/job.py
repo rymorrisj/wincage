@@ -83,10 +83,8 @@ class WindowsJobObject:
                 f"Failed to create Job Object '{self.name}'. Error code: {error_code}"
             )
 
-        # CreateJobObjectW returns a handle to the EXISTING job object on a
-        # name collision (ERROR_ALREADY_EXISTS) instead of failing. Two
-        # unrelated launches would then silently share one kernel object,
-        # and tearing down either would kill the other.
+        # CreateJobObjectW returns the EXISTING job object on a name collision
+        # instead of failing, letting two unrelated launches share one kernel object and have either's teardown kill the other.
         _ERROR_ALREADY_EXISTS = 183
         error_code = ctypes.windll.kernel32.GetLastError()
         if error_code == _ERROR_ALREADY_EXISTS:
@@ -328,10 +326,9 @@ class WindowsJobObject:
     def close(self) -> None:
         """Close the job object handle.
 
-        Once set_memory_limit or set_kill_on_close has run, KILL_ON_JOB_CLOSE
-        is in force, so closing the last handle to this job terminates every
-        process assigned to it. Call teardown() instead when an explicit
-        TerminateJobObject call is required before closing.
+        Once KILL_ON_JOB_CLOSE is set, closing the last handle terminates every
+        process still assigned to this job. Use teardown() instead if an
+        explicit TerminateJobObject call must happen first.
         """
         if self.job_handle:
             ctypes.windll.kernel32.CloseHandle(self.job_handle)
@@ -346,11 +343,7 @@ class WindowsJobObject:
             self.job_handle = None
 
     def handle_is_open(self) -> bool:
-        """Check whether the job object handle is open and queryable.
-
-        A handle can be open and queryable with
-        zero processes running in the job.
-        """
+        """Check whether the job object handle is open and queryable (true even with zero processes running)."""
         if not self.job_handle:
             return False
 

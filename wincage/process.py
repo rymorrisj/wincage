@@ -49,13 +49,9 @@ def _launch_native(
 ) -> SandboxProcess:
     """Launch a suspended process under the current user account via CreateProcessW.
 
-    The process is created with CREATE_SUSPENDED. The returned
-    SandboxProcess retains the main-thread handle.
-
-    The caller MUST call ``process.resume()`` exactly once, after the
-    process is assigned to its Job Object, or terminate it instead.
-    Otherwise the process is left permanently suspended and its thread
-    handle leaks.
+    Caller MUST call ``process.resume()`` exactly once after Job Object
+    assignment, or terminate it instead; otherwise it stays suspended
+    forever and its thread handle leaks.
     """
     cmd_line = subprocess.list2cmdline([executable_path] + args)
     cmd_buf = ctypes.create_unicode_buffer(cmd_line)
@@ -130,19 +126,10 @@ def _launch_in_container(
 
     sandbox_handle = _sandbox.launch(sandbox_config)
 
-    # The host duplicates its own handle to the target across the process
-    # boundary and reports it here, instead of Python reopening the target
-    # by pid. This closes the pid-reuse race: the target is a deliberate
-    # crash boundary, and a bare pid could already refer to an unrelated
-    # process by the time Python looked it up.
-    #
-    # Claim ownership atomically: grab the value and null the field under
-    # the same lock CLEANED_UP's close uses, so this always either claims a
-    # live handle before CLEANED_UP can close it, or observes None because
-    # CLEANED_UP already claimed and closed it first. The claim itself must
-    # stay outside any call that waits on CLEANED_UP (below): _fire() needs
-    # this same lock to run its own close+null, so holding it across a wait
-    # for CLEANED_UP would deadlock the two against each other.
+    # The host hands over its own duplicated handle instead of Python reopening
+    # by pid, closing a pid-reuse race window. The claim (grab + null) happens
+    # under the same lock CLEANED_UP's close uses, and must not wrap any wait
+    # for CLEANED_UP or the two would deadlock each other.
     with sandbox_handle._process_handle_lock:
         win32_handle = sandbox_handle.process_handle
         sandbox_handle.process_handle = None
@@ -179,15 +166,10 @@ def launch_suspended(
 ) -> SandboxProcess:
     """Launch exe suspended, natively or inside an AppContainer.
 
-    Dispatches on whether sandbox_config is given:
-    - None launches natively via CreateProcessW (CREATE_SUSPENDED).
-    - A SandboxConfig launches inside an AppContainer via the sandbox
-      package. It creates the process suspended and resumes it itself
-      inside sandbox_host.exe, after that process applies its own Job
-      Object limits.
-
-    See run_under_job's apply_limits parameter for why the caller-side
-    Job Object does not re-apply those limits on this path.
+    With sandbox_config=None, launches natively via CreateProcessW
+    (CREATE_SUSPENDED). With a SandboxConfig, launches inside an
+    AppContainer, which resumes the process itself inside sandbox_host.exe
+    after applying its own Job Object limits.
     """
     if sandbox_config is not None:
         return _launch_in_container(exe, args, flags, sandbox_config, cwd=cwd)
@@ -211,32 +193,20 @@ def run_under_job(
 ) -> tuple[SandboxProcess, WindowsJobObject]:
     """Create a Job Object, assign *process* to it, and resume it.
 
-    *process* must already be suspended (see launch_suspended) and not yet
-    assigned to any job.
+    *process* must already be suspended and not yet assigned to any job.
+    memory_limit_mb, cpu_limit_percent, and the cpu/skip flags are all
+    pre-resolved by the caller; this function does not fetch them itself.
 
-    memory_limit_mb, cpu_limit_percent, cpu_min_rate_percent,
-    skip_cpu_limit, and skip_memory_limit are all pre-resolved by the
-    caller. This function does not fetch them itself.
+    apply_limits=True numerically enforces the limits (native path).
+    apply_limits=False only sets kill-on-close, since sandbox_host.exe's own
+    Job Object already enforced the limits before this process was resumed.
 
-    apply_limits selects what this Job Object does:
-    - True: it numerically enforces memory_limit_mb/cpu_limit_percent.
-      This is the native, non-containerized path. skip_cpu_limit and
-      skip_memory_limit independently gate each resource, matching a Job
-      Object's own no-cap-if-skipped semantics.
-    - False: it only sets kill-on-close. This is the container path,
-      where sandbox_host.exe's own Job Object already applied the limits
-      before this process was ever resumed. Re-applying them here would
-      be redundant, and could disagree with what was actually enforced if
-      the two code paths ever drift.
+    sandbox_config not None marks a container launch: the breakaway retry
+    re-launches through the container path, and the final resume() is
+    skipped since the process was already resumed inside sandbox_host.exe.
 
-    sandbox_config being non-None marks this as a container launch:
-    - The breakaway retry re-launches through the container path.
-    - The final resume() is skipped. A container launch's process was
-      resumed already, inside sandbox_host.exe, and carries no thread
-      handle.
-
-    If Job Object assignment fails, *process* is terminated and the
-    launch is aborted. There is no unsandboxed fallback.
+    On Job Object assignment failure, *process* is terminated and the
+    launch is aborted; there is no unsandboxed fallback.
     """
     container_enabled = sandbox_config is not None
 
@@ -255,14 +225,12 @@ def run_under_job(
             else:
                 job_object.set_memory_limit(job_object.memory_limit_mb)
         else:
-            # Limits already applied inside sandbox_host.exe's own Job
-            # Object; only kill-on-close is set so tearing down this handle
-            # still terminates the process.
+            # Limits were already enforced inside sandbox_host.exe's own Job
+            # Object; only kill-on-close is set so closing this handle still kills it.
             job_object.set_kill_on_close()
     except Exception as e:
-        # Terminate directly while suspended, TerminateProcess works on a
-        # suspended process, so there is no need to resume it first (which
-        # would let this doomed process run uncapped, however briefly).
+        # TerminateProcess works on a suspended process, so there is no need
+        # to resume it first, which would let this doomed process run uncapped.
         cleanup_errors = []
         try:
             process.kill()
@@ -298,9 +266,8 @@ def run_under_job(
         _needs_breakaway_retry = True
 
     if _needs_breakaway_retry:
-        # Bound the wait on the first attempt's sandbox_host.exe stub so a
-        # stalled stub cannot leak a process/thread/Job-Object handle into
-        # the retry attempt. Force-kill it if it hasn't exited in time.
+        # Bounds the wait on the first attempt's stub so a stalled process can't
+        # leak a handle into the retry; force-kills it if it hasn't exited in time.
         if process.sandbox_handle is not None:
             stub = process.sandbox_handle
             try:
@@ -372,12 +339,8 @@ def run_under_job(
                 f"Failed to assign breakaway process to job object: {exc3}"
             )
 
-    # Assignment succeeded and limits are set. Resume the suspended
-    # main thread. Container launches were resumed inside sandbox_host.exe 
-    # and carry no thread handle. resume() closes hThread.
-    #
-    # A resume failure here would leave the process hung. Terminate and abort rather 
-    # than return a permanently suspended process.
+    # Only the native path resumes here; container launches were already resumed
+    # inside sandbox_host.exe. Abort on failure rather than return a hung process.
     if not container_enabled:
         try:
             process.resume()
@@ -397,10 +360,9 @@ def run_under_job(
                 f"Failed to resume process {process.pid} after job assignment: {exc}"
             )
 
-    # The process handle is deliberately left open so SandboxProcess.poll()
-    # can call GetExitCodeProcess. _close_handles() closes it once the
-    # exit is observed.
-    #
-    # The caller must also retain job_object: it holds the only handle to
-    # a KILL_ON_JOB_CLOSE job, so dropping it terminates the target.
+    # The process handle stays open here so SandboxProcess.poll() can call
+    # GetExitCodeProcess; _close_handles() closes it once the exit is observed.
+
+    # The caller must also retain job_object: it holds the only handle to a
+    # KILL_ON_JOB_CLOSE job, so dropping it terminates the target.
     return (process, job_object)
