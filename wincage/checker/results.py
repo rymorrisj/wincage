@@ -8,6 +8,7 @@ class CheckStatus(Enum):
     PASS = "pass"
     FAIL = "fail"
     SKIP = "skip"
+    UNCONFIRMED = "unconfirmed"
 
 
 @dataclass(frozen=True)

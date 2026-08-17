@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import ctypes.wintypes as _wt
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 
 from ..sandbox import (
     SandboxConfig,
     SandboxError,
+    SandboxEvent,
     SandboxHandle,
     SandboxStage,
     launch,
@@ -88,7 +90,8 @@ def _verify_confinement(handle: SandboxHandle) -> str | None:
 
 
 # Default AppContainer moniker prefix for probe profiles; override via
-# run_checks(moniker_prefix=...) to namespace them under your own app.
+# moniker_prefix on run_checks()/run_gpu_checks()/run_baseline_checks() to
+# namespace them under your own app.
 DEFAULT_MONIKER_PREFIX: str = "SandboxChecker"
 
 # Seconds _async_run_one waits for a launched probe to exit before
@@ -96,7 +99,7 @@ DEFAULT_MONIKER_PREFIX: str = "SandboxChecker"
 _PROBE_WAIT_TIMEOUT_SECONDS = 30.0
 
 # (name, exe_name, pass_message); which programs a failure affects is
-# supplied by the caller via run_checks(affects=...), not stored here.
+# supplied by the caller via run_gpu_checks(affects=...), not stored here.
 _CHECKS: list[tuple[str, str, str]] = [
     (
         "sdl2_d3d11",
@@ -250,11 +253,11 @@ def _run_one(
     return asyncio.run(_async_run_one(name, config, pass_message, affects))
 
 
-def run_checks(
+def run_gpu_checks(
     moniker_prefix: str = DEFAULT_MONIKER_PREFIX,
     affects: Mapping[str, list[str]] | None = None,
 ) -> list[CheckResult]:
-    """Run every capability probe and return one CheckResult per probe, never raising for a per-probe failure.
+    """Run every GPU/UI capability probe and return one CheckResult per probe, never raising for a per-probe failure.
 
     Raises SandboxError if called from a running event loop, since each probe launch needs its own asyncio.run().
 
@@ -272,10 +275,10 @@ def run_checks(
         pass
     else:
         raise SandboxError(
-            message="run_checks() cannot be called from within a running event loop",
+            message="run_gpu_checks() cannot be called from within a running event loop",
             stage=SandboxStage.CONFIG_VALIDATION,
             suggestions=[
-                "Call run_checks() from synchronous code with no event loop "
+                "Call run_gpu_checks() from synchronous code with no event loop "
                 "running, or run it in a separate thread",
             ],
         )
@@ -294,3 +297,223 @@ def run_checks(
             )
         )
     return results
+
+
+# ---- Baseline checks: general-purpose, no GPU/windowing dependency ----
+
+_POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+# Seconds _async_run_baseline_launch waits for the trivial baseline process to
+# reach CLEANED_UP. Deliberately short, it should resolve in well under a second on a healthy host.
+_BASELINE_WAIT_TIMEOUT_SECONDS = 5.0
+
+# AppContainer requires Windows 8 (6.2); below that it does not exist at all.
+_OS_VERSION_MIN_APPCONTAINER = (6, 2)
+# The floor wincage is actually tested against.
+_OS_VERSION_MIN_CONFIRMED = (10, 0)
+
+
+def _check_os_version() -> CheckResult:
+    """Check the OS version floor via sys.getwindowsversion().
+
+    Windows 10+ is a confirmed PASS. Windows 8/8.1 is below what wincage is
+    tested against, but AppContainer and Job Objects are believed to exist
+    there too, so it is reported as UNCONFIRMED (this check itself passed;
+    the host just isn't one this project has verified on) rather than FAIL.
+    Below Windows 8, AppContainer did not exist yet, so it is a hard FAIL.
+    """
+    win_version = sys.getwindowsversion()
+    version = (win_version.major, win_version.minor)
+    detail = f"Windows {win_version.major}.{win_version.minor} build {win_version.build}"
+
+    if version >= _OS_VERSION_MIN_CONFIRMED:
+        return CheckResult(
+            name="os_version",
+            status=CheckStatus.PASS,
+            message=f"{detail} meets the Windows 10+ floor wincage is tested against",
+            affects=[],
+        )
+    if version >= _OS_VERSION_MIN_APPCONTAINER:
+        return CheckResult(
+            name="os_version",
+            status=CheckStatus.UNCONFIRMED,
+            message=(
+                f"{detail} is below the Windows 10 floor wincage is tested against. "
+                "AppContainer and Job Object APIs are believed to exist back to "
+                "Windows 8, so this may still work, but this project has never "
+                "tested or run on this OS version."
+            ),
+            affects=[],
+        )
+    return CheckResult(
+        name="os_version",
+        status=CheckStatus.FAIL,
+        message=f"{detail} predates Windows 8; AppContainer did not exist before Windows 8",
+        affects=[],
+    )
+
+
+async def _async_run_baseline_launch(moniker_prefix: str) -> list[CheckResult]:
+    """One trivial launch, shared across three baseline CheckResults.
+
+    job_config (cpu_max_rate/memory_limit_mb) is always part of every
+    launch() handshake payload (see sandbox.py's _build_stdin_payload), so a
+    single trivial launch already exercises AppContainer provisioning, Job
+    Object assignment, and clean launch/terminate together. One launch is
+    enough to report on all three, instead of three separate
+    provision/teardown cycles.
+    """
+    moniker = f"{moniker_prefix}.baseline"
+    config = SandboxConfig(
+        moniker=moniker,
+        exe_path=_POWERSHELL,
+        args=["-NoProfile", "-Command", "exit 0"],
+        cpu_max_rate=80,
+        cpu_min_rate=5,
+        memory_limit_mb=256,
+    )
+
+    try:
+        handle = launch(config)
+    except SandboxError as exc:
+        # Only a job_assign error confirms the job limits themselves
+        # failed. Any other stage means job assignment was never reached, so job_limits 
+        # is inconclusive, not FAIL.
+        job_failed = exc.stage == SandboxStage.JOB_ASSIGN
+        message = str(exc)
+        return [
+            CheckResult(name="appcontainer_confinement", status=CheckStatus.FAIL, message=message, affects=[]),
+            CheckResult(name="launch_terminate", status=CheckStatus.FAIL, message=message, affects=[]),
+            CheckResult(
+                name="job_limits",
+                status=CheckStatus.FAIL if job_failed else CheckStatus.SKIP,
+                message=message if job_failed
+                else f"launch failed before job limits could be evaluated: {message}",
+                affects=[],
+            ),
+        ]
+    except Exception as exc:
+        message = f"unexpected error launching baseline check: {exc}"
+        return [
+            CheckResult(name="appcontainer_confinement", status=CheckStatus.FAIL, message=message, affects=[]),
+            CheckResult(name="launch_terminate", status=CheckStatus.FAIL, message=message, affects=[]),
+            CheckResult(name="job_limits", status=CheckStatus.FAIL, message=message, affects=[]),
+        ]
+
+    # A successful launch() means the host reported no job_assign error
+    # while applying cpu_max_rate/memory_limit_mb; structural check only, not
+    # a measurement of actual throttling (see test_job_limits.py for that).
+    job_result = CheckResult(
+        name="job_limits",
+        status=CheckStatus.PASS,
+        message="cpu_max_rate/memory_limit_mb applied and the process launched under the job without error",
+        affects=[],
+    )
+
+    confinement_error = _verify_confinement(handle)
+    confinement_result = CheckResult(
+        name="appcontainer_confinement",
+        status=CheckStatus.PASS if confinement_error is None else CheckStatus.FAIL,
+        message="AppContainer confinement confirmed via process token" if confinement_error is None
+        else f"could not confirm AppContainer confinement: {confinement_error}",
+        affects=[],
+    )
+
+    done = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def on_cleaned_up(payload):
+        loop.call_soon_threadsafe(done.set)
+
+    handle.on(SandboxEvent.CLEANED_UP, on_cleaned_up)
+
+    try:
+        await asyncio.wait_for(done.wait(), timeout=_BASELINE_WAIT_TIMEOUT_SECONDS)
+        launch_result = CheckResult(
+            name="launch_terminate",
+            status=CheckStatus.PASS,
+            message="launched and cleanly terminated a trivial CPU-only process",
+            affects=[],
+        )
+    except asyncio.TimeoutError:
+        await handle.terminate()
+        launch_result = CheckResult(
+            name="launch_terminate",
+            status=CheckStatus.FAIL,
+            message=f"process did not reach CLEANED_UP within {_BASELINE_WAIT_TIMEOUT_SECONDS:.0f}s",
+            affects=[],
+        )
+    finally:
+        # No broker_files were granted for this launch, so there is nothing
+        # for reset_container to revoke it only resets the profile itself.
+        try:
+            reset_container(moniker)
+        except SandboxError:
+            pass
+
+    return [confinement_result, launch_result, job_result]
+
+
+def run_baseline_checks(moniker_prefix: str = DEFAULT_MONIKER_PREFIX) -> list[CheckResult]:
+    """Run every baseline confinement check and return one CheckResult per check, never raising for a per-check failure.
+
+    Confirms the OS version floor plus core wincage confinement primitives (AppContainer, Job Object
+    limits, launch/terminate) work on this host.
+
+    Raises SandboxError if called from a running event loop, matching run_gpu_checks().
+
+    Args:
+        moniker_prefix: namespaces the persistent per-user AppContainer
+            profile this provisions, as f"{moniker_prefix}.baseline".
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise SandboxError(
+            message="run_baseline_checks() cannot be called from within a running event loop",
+            stage=SandboxStage.CONFIG_VALIDATION,
+            suggestions=[
+                "Call run_baseline_checks() from synchronous code with no event loop "
+                "running, or run it in a separate thread",
+            ],
+        )
+
+    results = [_check_os_version()]
+    results.extend(asyncio.run(_async_run_baseline_launch(moniker_prefix)))
+    return results
+
+
+def run_checks(
+    moniker_prefix: str = DEFAULT_MONIKER_PREFIX,
+    affects: Mapping[str, list[str]] | None = None,
+    include_gpu_checks: bool = False,
+) -> list[CheckResult]:
+    """Run baseline checks, then GPU/UI checks if requested and the baseline didn't hard-fail.
+
+    run_baseline_checks() always runs first. 
+    run_gpu_checks() then runs only if include_gpu_checks is True
+    and no baseline result is a FAIL (a baseline SKIP or UNCONFIRMED, e.g.
+    an OS version this project hasn't verified on, does not block GPU/UI
+    checks from running).
+
+    Raises SandboxError if called from a running event loop (propagated from
+    run_baseline_checks()/run_gpu_checks()).
+
+    Args:
+        moniker_prefix: namespaces the persistent per-user AppContainer
+            profiles this provisions, shared across baseline and GPU checks.
+        affects: caller's impacted-components list per GPU check name; see
+            run_gpu_checks(). Not used by baseline checks.
+        include_gpu_checks: if True, also run run_gpu_checks() after a
+            passing baseline. Defaults to False: GPU/UI checks are optional
+            and as-needed, only baseline is mandatory/always-on.
+    """
+    baseline_results = run_baseline_checks(moniker_prefix)
+
+    baseline_failed = any(r.status == CheckStatus.FAIL for r in baseline_results)
+    if baseline_failed or not include_gpu_checks:
+        return baseline_results
+
+    return baseline_results + run_gpu_checks(moniker_prefix, affects)

@@ -3,22 +3,30 @@
 [![Windows Only](https://img.shields.io/badge/platform-Windows--10%20%2F%2011-blue.svg)](https://microsoft.com/windows)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![Runtime Dependencies: Zero](https://img.shields.io/badge/runtime%20deps-zero-brightgreen.svg)]()
-[![Build: MSYS2 UCRT64](https://img.shields.io/badge/build-MSYS2%20UCRT64-blue.svg)](https://github.com/msys2)
+[![Build: MSYS2 UCRT64](https://img.shields.io/badge/build-MSYS2%20UCRT64-purple.svg)](https://github.com/msys2)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 [Peach 1UP](https://github.com/rymorrisj/peach_1up) runs a wide variety of third-party emulator software, and that software doesn't always behave. Hanging processes, memory leaks, and runaway CPU usage are common failure modes with binaries you didn't write and can't patch. wincage gives a host application a control layer over that: hard resource limits and process isolation. GPU and audio access stay intact, which those emulators need to work.
 
-Windows process sandboxing. Runs an executable inside an AppContainer with a Job Object applying CPU/memory limits. Includes a diagnostic package that checks whether a machine's AppContainer allows the graphics/audio API stacks a sandboxed process needs.
+Windows process sandboxing. Runs an executable inside an AppContainer with a Job Object applying CPU/memory limits. Includes a diagnostic package: a baseline check that core confinement works at all, plus optional probes for whether a machine's AppContainer allows the graphics/audio API stacks a sandboxed process needs.
 
 | Package | Purpose |
 |---|---|
-| `wincage` | Core sandbox. `launch(config)` provisions a per-moniker AppContainer, grants `broker_files` access, starts the target suspended under a Job Object, resumes it, returns a `SandboxHandle` with event callbacks (`STARTED`/`EXITED`/`ERROR`/`CLEANED_UP`). `reset_container(moniker)` deletes a provisioned profile. `revoke_grants(moniker, broker_files)` reverses a prior grant. |
-| `wincage.checker` | Nested diagnostic subpackage. `run_checks()` runs disposable probes inside a throwaway AppContainer and reports per-API-stack pass/fail. Launches its probes through `wincage.launch()` itself, so it ships nested rather than standalone. |
+| `wincage` | Core sandbox. `launch(config)` provisions a per-moniker AppContainer, grants `broker_files` access, starts the target suspended under a Job Object, resumes it, returns a `SandboxHandle` with event callbacks (`STARTED`/`EXITED`/`ERROR`/`CLEANED_UP`). `reset_container(moniker)` deletes a provisioned profile. `revoke_grants(moniker, broker_files)` reverses a prior grant. No GPU or windowing dependency. |
+| `wincage.checker` | Nested diagnostic subpackage. `run_baseline_checks()` confirms core confinement (AppContainer, Job Object limits, launch/terminate, OS version) works on the host. `run_gpu_checks()` runs disposable D3D11/OpenGL/Qt probes inside a throwaway AppContainer, only relevant if your own workload does GPU rendering or opens windows. `run_checks()` always runs the baseline first, then the GPU probes too if `include_gpu_checks=True`. Launches its probes through `wincage.launch()` itself, so it ships nested rather than standalone. |
+
+## Requirements
+
+`wincage` core has no GPU or hardware dependency. It works on any host meeting the OS/Python/build-toolchain requirements.
+
+Confirmed on Windows 10 and 11. The Job Object CPU rate control APIs wincage uses are documented as
+available since Windows 8, so wincage may work there too, but that is unconfirmed: this project has
+never tested or run on Windows 8/8.1.
 
 ## Two isolation modes
 
 - **AppContainer + Job Object** (`launch()`), the default. Full security isolation plus resource limits. Use this unless a target process needs raw device I/O.
-- **Job Object only** (`launch_suspended()` / `run_under_job()`), a fallback. Resource limits without AppContainer confinement. Use it for processes that call `DeviceIoControl` against a raw device handle, since that fails under AppContainer.
+- **Job Object only** (`launch_suspended()` / `run_under_job()`), a fallback. Resource limits without AppContainer confinement. Use it for processes that call `DeviceIoControl` against a raw device handle, since that fails under AppContainer or any situation in which you do not/cannot use AppContainer but still need resource limits.
 
 ## Architecture
 
@@ -43,17 +51,17 @@ pacman -S mingw-w64-ucrt-x86_64-gcc \
 Build the sandbox host from an MSYS2 UCRT64 terminal:
 
 ```sh
-bash wincage/build.sh                       # -> wincage/sandbox_host.exe
+bash wincage/build.sh                       # generates wincage/sandbox_host.exe
 OUT_NAME=myhost.exe bash wincage/build.sh   # custom output name
 ```
 
-Build the checker's capability probes separately:
+Build the checker's capability probes separately if you need GPU checks:
 
 ```sh
 bash wincage/checker/src/build_tests.sh
 ```
 
-Outputs `test_sdl2_d3d11.exe`, `test_sdl2_opengl.exe`, and (if Qt is available) `test_qt_qpa.exe` into `wincage/checker/src/`. Neither binary set is committed. Both must be built before use.
+Outputs `test_sdl2_d3d11.exe`, `test_sdl2_opengl.exe`, and (if Qt is available) `test_qt_qpa.exe` into `wincage/checker/src/`. Neither binary set is committed. Both must be built on the host system before use.
 
 Install the Python package:
 
@@ -111,22 +119,37 @@ wincage.revoke_grants(
 
 `launch()` returns a `SandboxHandle` once the child process starts. `STARTED` has already happened by the time you get the handle back, so registering a `STARTED` callback replays it immediately and synchronously. `EXITED`, `ERROR`, and `CLEANED_UP` fire later from the watcher's asyncio task. Call `launch()` from within a running event loop, or register callbacks any time before the event fires.
 
-Run the capability checker before relying on the sandbox for a specific graphics/audio API:
+Run the baseline checker to confirm core confinement works on this host, no GPU/UI probes involved:
+
+```python
+from wincage.checker import run_baseline_checks, CheckStatus
+
+for r in run_baseline_checks():
+    print(f"{r.name}: {r.status.value} - {r.message}")
+```
+
+Add the GPU/audio capability probes too, before relying on the sandbox for a specific graphics/audio API:
 
 ```python
 from wincage.checker import run_checks, CheckStatus
 
-for r in run_checks():
+for r in run_checks(include_gpu_checks=True):
     print(f"{r.name}: {r.status.value} - {r.message}")
     if r.status == CheckStatus.FAIL:
         print(f"  affects: {', '.join(r.affects)}")
 ```
 
-`run_checks()` never raises. It always returns `list[CheckResult]`, each `PASS`, `FAIL`, or `SKIP`. `SKIP` means probe binaries aren't built yet. `affects` is empty by default. Pass your own `affects={"sdl2_d3d11": [...], ...}` mapping if you want each result to carry which of your components a failure impacts.
+`run_checks()` always runs `run_baseline_checks()` first. `run_gpu_checks()` only follows if
+`include_gpu_checks=True` (default `False`) and no baseline result is a `FAIL`. Call
+`run_gpu_checks()` directly if you want the GPU/UI probes. Each returns `list[CheckResult]` with `status` one of `PASS`, `FAIL`, `SKIP`, or `UNCONFIRMED`. `SKIP` means a GPU probe binary isn't built yet. These functions always return one of those values and do not throw on error.
+
+`UNCONFIRMED` means a baseline check (currently just the OS version floor) passed on a configuration this project hasn't verified, not a failure. `affects` is empty by default for GPU checks and always empty for baseline checks, since a baseline failure affects everything downstream. Pass your own `affects={"sdl2_d3d11": [...], ...}` mapping to `run_checks()`/`run_gpu_checks()` if you want each GPU result to carry which of your components a failure impacts.
 
 ### Runtime diagnostic scripts
 
-`wincage/scripts/` answers a different question than the checker: not "will sandboxing work here" but "is this running process actually confined as expected." `Test-AppContainerStatus.ps1` and `Test-JobObjectStatus.ps1` both take `-Moniker`, matching `SandboxConfig.moniker`, or `-ProcessId` directly. See `Get-Help .\Test-AppContainerStatus.ps1 -Full` for what each check can and can't prove.
+`wincage/scripts/` checks live instances of wincage running on a host. `Test-AppContainerStatus.ps1` and `Test-JobObjectStatus.ps1` both take `-Moniker`, matching `SandboxConfig.moniker`, or `-ProcessId` directly. See `Get-Help .\Test-AppContainerStatus.ps1 -Full` for what each check can and can't prove.
+
+Use these to confirm that your use of wincage is working as expected.
 
 **`Test-AppContainerStatus.ps1`**
 
@@ -221,10 +244,12 @@ WARNING: [same caveat as above]
 
 | Export | What it is |
 |---|---|
-| `run_checks(moniker_prefix=..., affects=...)` | Runs every capability probe, never raises. |
+| `run_checks(moniker_prefix=..., affects=..., include_gpu_checks=False)` | Runs `run_baseline_checks()`, then `run_gpu_checks()` too if `include_gpu_checks=True` and the baseline didn't `FAIL`. Never raises for a per-check failure. |
+| `run_baseline_checks(moniker_prefix=...)` | Runs the OS version, AppContainer, Job Object, and launch/terminate baseline checks. No GPU/windowing dependency. Never raises for a per-check failure. |
+| `run_gpu_checks(moniker_prefix=..., affects=...)` | Runs the D3D11/OpenGL/Qt capability probes. Never raises for a per-probe failure. |
 | `CheckResult` | `name`, `status`, `message`, `affects`. |
-| `CheckStatus` | `PASS`, `FAIL`, `SKIP`. |
-| `DEFAULT_MONIKER_PREFIX` | Default AppContainer moniker prefix `run_checks()` uses when none is passed. |
+| `CheckStatus` | `PASS`, `FAIL`, `SKIP`, `UNCONFIRMED`. |
+| `DEFAULT_MONIKER_PREFIX` | Default AppContainer moniker prefix used when `moniker_prefix` isn't passed. |
 
 ## Package layout
 
@@ -244,7 +269,7 @@ wincage/                  # sandbox core
 ├── scripts/               # runtime diagnostic PowerShell scripts
 └── checker/               # nested diagnostic subpackage
     ├── __init__.py       # public exports
-    ├── checker.py        # run_checks()
+    ├── checker.py        # run_checks() / run_baseline_checks() / run_gpu_checks()
     ├── results.py        # CheckResult, CheckStatus
     └── src/               # capability-probe test programs + build_tests.sh
 ```
@@ -265,8 +290,11 @@ This repo has three separate things that look like "tests":
 - `wincage/scripts/*.ps1`: diagnostic tools for a live process, not a test suite. Use them to check
   AppContainer/Job Object isolation on something already running. See [Runtime diagnostic
   scripts](#runtime-diagnostic-scripts).
-- `wincage.checker.run_checks()`: checks whether D3D11/OpenGL/Qt survive confinement on your machine.
-  Run it before shipping something that needs GPU/UI access under wincage.
+- `wincage.checker.run_baseline_checks()`: checks whether core confinement (AppContainer, Job Object
+  limits, launch/terminate) and the OS version work on this host at all. No GPU dependency.
+- `wincage.checker.run_gpu_checks()`: checks whether D3D11/OpenGL/Qt survive confinement on your
+  machine. Run it (or `run_checks(include_gpu_checks=True)`) before shipping something that needs
+  GPU/UI access under wincage.
 
 ## Known limitations
 
@@ -283,7 +311,7 @@ Read this before relying on `wincage` as a hard security control layer
 - AppContainer plus a Job Object reduces what a launched process can reach. **It does not eliminate risk.**
 - A process started through `launch()` still runs as the launching user's identity. It still has whatever `broker_files` paths you granted it. It still shares the desktop, window station, audio session, and GPU with everything else that user runs. Its access to that shared desktop and window station is narrowed to creating and drawing its own window and receiving its own input, not the hooks, clipboard, or screen-capture access that would let it interfere with other apps on it.
 - **This is not a complete sandbox against malicious or untrusted code.** It's built for code you already trust: your own executables, a plugin or worker whose failure mode is a bug rather than an attack, or a third-party tool you're limiting for robustness. It has had an internal logic/pattern review (ACL over-grant paths, desktop/window-station access scope, PID reuse, JSON parser input handling), not a penetration test or formal security assessment. It also was never designed as a containment boundary for hostile code: no adversarial threat model, no fuzzing.
-- `run_checks()` tells you whether an API stack survives confinement on a given machine. It does not tell you confinement is sufficient for your threat model.
+- `run_baseline_checks()` tells you whether core confinement works at all; `run_gpu_checks()` tells you whether a specific API stack survives confinement on a given machine. Neither tells you confinement is sufficient for your threat model.
 - For a hard security boundary against actively distrusted code, use a VM or dedicated hardware isolation instead.
 
 ## Contributing
