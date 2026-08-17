@@ -6,9 +6,11 @@
 [![Native build: MSYS2 UCRT64](https://img.shields.io/badge/native%20build-MSYS2%20UCRT64-purple.svg)](https://github.com/msys2)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[Peach 1UP](https://github.com/rymorrisj/peach_1up) runs a wide variety of third-party emulator software, and that software doesn't always behave. Hanging processes, memory leaks, and runaway CPU usage are common failure modes with binaries you didn't write and can't patch. wincage gives a host application a control layer over that: hard resource limits and process isolation. GPU and audio access stay intact, which those emulators need to work.
+wincage gives a host a control layer with hard resource limits and process isolation. GPU and audio access stay intact. Originally built as small scripts inside [Peach 1UP](https://github.com/rymorrisj/peach_1up) I extracted it out, and generalized it so as to be a more general tool for others.
 
 Windows process sandboxing. Runs an executable inside an AppContainer with a Job Object applying CPU/memory limits. Includes a diagnostic package: a baseline check that core confinement works at all, plus optional probes for whether a machine's AppContainer allows the graphics/audio API stacks a sandboxed process needs.
+
+[Peach 1UP](https://github.com/rymorrisj/peach_1up) runs a wide variety of third-party emulator software, and that software doesn't always behave. Hanging processes, memory leaks, and runaway CPU usage are common failure modes with binaries you didn't write and can't patch.
 
 | Package | Purpose |
 |---|---|
@@ -346,7 +348,9 @@ Read this before relying on `wincage` as a hard security control layer
 
 ## Contributing
 
-Open an issue for bugs or platform-compatibility gaps. Changes to the AppContainer/Job Object provisioning code (`sandbox_host.exe`, `src/`) should include the reasoning behind any new native Win32 call, since a mistake there is a crash-fault-boundary concern, not just a bug.
+Open an issue for bugs or platform-compatibility gaps. Changes to the AppContainer/Job Object provisioning code (`sandbox_host.exe`, `src/`) should include the reasoning behind any new native Win32 call.
+
+I will support this package for a time but my primary focus is [Peach 1UP](https://github.com/rymorrisj/peach_1up). Would love any help or consideration others would like to give if they find this useful. 
 
 ## License
 
