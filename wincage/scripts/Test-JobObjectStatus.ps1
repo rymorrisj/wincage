@@ -93,12 +93,16 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true, Position = 0)]
+    [Parameter(Mandatory = $false, Position = 0)]
     [string]$Moniker,
 
     [Parameter(Mandatory = $false)]
     [int]$ProcessId
 )
+
+if (-not $PSBoundParameters.ContainsKey('ProcessId') -and -not $PSBoundParameters.ContainsKey('Moniker')) {
+    throw "Either -Moniker (discovery mode) or -ProcessId (single-process mode) must be supplied."
+}
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'

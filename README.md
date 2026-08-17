@@ -321,6 +321,16 @@ This repo has three separate things that look like "tests":
 - **That marker doesn't work on FAT32/exFAT drives.** It relies on an NTFS/ReFS-only feature. On FAT32 or exFAT, the marker silently fails to write, so a crash mid-grant won't be detected or corrected automatically. NTFS/ReFS are the filesystems Windows uses for its main C drive
 - **`broker_files` paths are capped at MAX_PATH (260 characters).** Grant/secure/inherit all reach the file through the plain Win32 file APIs, no `\\?\` long-path prefix. A longer path fails the grant outright.
 - **Low level device I/O is not sandboxed** `DeviceIoControl` is a function in kernel32.dll that AppContainer blocks acces to without additional steps wincage does not take. Use `launch_suspended()`/`run_under_job()`, the native path, instead for these processes. 
+- **AppContainer confinement grants zero capabilities.** wincage never populates `SECURITY_CAPABILITIES.Capabilities`/`CapabilityCount`, so every confined process gets Windows default/deny result for named capabilities: 
+  - no network access (no `internetClient`)
+  - no device/sensor access (camera, microphone, GPS, cellular)
+  
+  Any target process that needs these will fail under confinement, this is Windows own AppContainer default/deny behavior, not a wincage bug. There's currently no `SandboxConfig` option to request specific capabilities. If your workload needs network or device access, don't enable AppContainer confinement for it, Job Object limits alone remain available without this restriction. Looking into adding support for this in the backlog below
+
+## Backlog
+
+- Capability requests: AppContainer grants zero capabilities by default (no network, no device/sensor access), and there is currently no `SandboxConfig` option to request specific capabilities for a confined process.
+- `revoke_grants()` only logs a warning on a no-op revoke (moniker matches nothing). Could return a structured result instead of/alongside logging, so a caller can detect this programmatically.
 
 ## Security disclaimer
 
