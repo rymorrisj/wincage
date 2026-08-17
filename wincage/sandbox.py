@@ -190,12 +190,9 @@ class SandboxHandle:
                 cleanup_future.set_result(None)
         elif self._proc and self._proc.poll() is None:
             self._proc.terminate()
-            # TerminateProcess runs no code in the target, so the host can
-            # never signal its own cleanup event. Wait on the process
-            # handle directly so this step resolves once the host actually
-            # exits. The watcher (see _watch_event) picks up the same exit
-            # and fires CLEANED_UP shortly after.
-            await loop.run_in_executor(None, self._proc.wait)
+            # No further wait needed here: the watcher's proc.poll() fallback
+            # (see _watch_event) already detects this exit and fires
+            # CLEANED_UP, which is what cleanup_future below resolves on.
 
         await cleanup_future
 
@@ -553,6 +550,10 @@ def _start_background_threads(
                 _watch_event(response["event_name"], handle, proc)
             )
         finally:
+            # loop.close() alone does not drain the default executor that
+            # run_in_executor(None, ...) lazily creates in _watch_event();
+            # without this, its worker thread leaks past this function's exit.
+            loop.run_until_complete(loop.shutdown_default_executor())
             loop.close()
 
     threading.Thread(target=_run_watcher, daemon=True).start()

@@ -237,6 +237,14 @@ wincage/                  # sandbox core
     └── src/               # capability-probe test programs + build_tests.sh
 ```
 
+## Tests, diagnostics, and checks
+
+Three separate things in this repo can look like "the test suite" but answer different questions:
+
+- **`wincage/tests/` (`python wincage/tests/run_tests.py`)** is wincage's own regression suite. It proves wincage's code behaves correctly: launch/terminate lifecycle, capture, ACL grants, resource limits. Run it after any change to `sandbox.py`, `sandbox_config.py`, `main.cpp`, or `checker.py`. `test_job_inspect.py` is excluded from the automated run; it needs a human at Process Explorer within a live 60-second window, see its own docstring to run it by hand.
+- **`wincage/scripts/*.ps1`** are live diagnostic tools, not a regression suite. They inspect AppContainer/Job Object isolation state on an already-running process (`Get-ProcessAppContainerSidString`, Job Object queries) to debug or confirm isolation on a real system. There's nothing to "pass" here, just state to read. See [Runtime diagnostic scripts](#runtime-diagnostic-scripts) above.
+- **`wincage.checker` (`run_checks()`)** is for developers integrating wincage into their own project. It answers "does D3D11/OpenGL/Qt survive confinement on *this* machine, for *my* workload," not "is wincage's own code correct." Run it against your target machines before relying on confinement in your application.
+
 ## Known limitations
 
 - **Windows only.** Both `sandbox_host.exe` and the Python wrapper's `ctypes.windll` calls require Win32 AppContainer/Job Object APIs. Import fails on non-Windows hosts.
