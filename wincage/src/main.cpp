@@ -5,6 +5,7 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 
 #include "container.h"
 #include "job.h"
@@ -108,6 +109,10 @@ struct LaunchConfig {
     JobConfig job_config;
     DWORD parent_pid;
     bool breakaway;
+    // Independent opt-in signal, not inferred from any broker_files mode:
+    // gating the target-stdout pipe on this alone means callers who don't
+    // set it (including every existing caller) are unaffected.
+    bool capture_target_stdout;
 };
 
 // Shared by parse_config (launch) and the --revoke stdin payload: both send
@@ -131,6 +136,7 @@ static LaunchConfig parse_config(const JVal& j) {
     cfg.working_dir = to_wide(j.value("working_dir", std::string{}));
     cfg.parent_pid  = j.at("parent_pid").get<DWORD>();
     cfg.breakaway   = j.value("breakaway", false);
+    cfg.capture_target_stdout = j.value("capture_target_stdout", false);
 
     for (auto& a : j.at("args").arr) {
         cfg.args.push_back(to_wide(a.get<std::string>()));
@@ -441,8 +447,77 @@ static int run_launch(const LaunchConfig& cfg) {
         }
     }
 
+    // Independent of the broker_files loop above: capture_target_stdout is
+    // its own opt-in signal, never inferred from a broker_file entry or its
+    // mode, so this cannot silently affect a caller who doesn't set it.
+    // This pipe is entirely separate from the host's own stdout (used by
+    // emit_error/JsonOut for the JSON handshake protocol below); nothing
+    // here touches that stream.
+    HANDLE target_stdout_read  = nullptr;
+    HANDLE target_stdout_write = nullptr;
+    HANDLE target_stdin        = nullptr;
+
+    auto close_target_stdout_read = [&target_stdout_read]() {
+        if (target_stdout_read) {
+            CloseHandle(target_stdout_read);
+            target_stdout_read = nullptr;
+        }
+    };
+
+    if (cfg.capture_target_stdout) {
+        SECURITY_ATTRIBUTES pipe_sa = {};
+        pipe_sa.nLength        = sizeof(pipe_sa);
+        pipe_sa.bInheritHandle = TRUE;
+        if (!CreatePipe(&target_stdout_read, &target_stdout_write, &pipe_sa, 0)) {
+            close_inherit_handles();
+            emit_error("PROCESS_CREATE",
+                       "CreatePipe (target stdout) failed (" + hex32(GetLastError()) + ")");
+            return 1;
+        }
+        // The host's own end must not be inheritable: CreateProcessW below
+        // only inherits handles named in inherit_handles (via
+        // PROC_THREAD_ATTRIBUTE_HANDLE_LIST), so this alone would not leak
+        // the read end to the target, but clearing it here means a future
+        // child launched some other way from this same host process
+        // couldn't pick it up either.
+        if (!SetHandleInformation(target_stdout_read, HANDLE_FLAG_INHERIT, 0)) {
+            CloseHandle(target_stdout_write);
+            close_target_stdout_read();
+            close_inherit_handles();
+            emit_error("PROCESS_CREATE",
+                       "SetHandleInformation (target stdout) failed (" + hex32(GetLastError()) + ")");
+            return 1;
+        }
+
+        // A defined, empty stdin rather than an unset one: STARTF_USESTDHANDLES
+        // requires all three standard handles once set, and NUL gives the
+        // target well-defined EOF-on-read behaviour instead of an invalid handle.
+        SECURITY_ATTRIBUTES nul_sa = {};
+        nul_sa.nLength        = sizeof(nul_sa);
+        nul_sa.bInheritHandle = TRUE;
+        target_stdin = CreateFileW(L"NUL", GENERIC_READ,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE, &nul_sa,
+                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (target_stdin == INVALID_HANDLE_VALUE) {
+            CloseHandle(target_stdout_write);
+            close_target_stdout_read();
+            close_inherit_handles();
+            emit_error("PROCESS_CREATE",
+                       "CreateFileW (NUL for target stdin) failed (" + hex32(GetLastError()) + ")");
+            return 1;
+        }
+
+        // Rides the same PROC_THREAD_ATTRIBUTE_HANDLE_LIST and the same
+        // close_inherit_handles() cleanup after CreateProcessW as
+        // broker_files "inherit" entries, without adding a SANDBOX_HANDLE_N
+        // env var: that convention is specific to those entries.
+        inherit_handles.push_back(target_stdout_write);
+        inherit_handles.push_back(target_stdin);
+    }
+
     SandboxEvent evt(cfg.moniker, cfg.parent_pid);
     if (evt.create() == EventResult::Failed) {
+        close_target_stdout_read();
         close_inherit_handles();
         emit_error("PROCESS_CREATE", "CreateEventW failed");
         return 1;
@@ -479,6 +554,16 @@ static int run_launch(const LaunchConfig& cfg) {
         si.StartupInfo.wShowWindow = SW_SHOWNORMAL;
         si.lpAttributeList         = attrs.get();
 
+        if (cfg.capture_target_stdout) {
+            // Fully separate from the host's own stdout (STARTUPINFO here
+            // describes the target, not this host process); the host's own
+            // JSON handshake stream is untouched by this.
+            si.StartupInfo.dwFlags   |= STARTF_USESTDHANDLES;
+            si.StartupInfo.hStdInput  = target_stdin;
+            si.StartupInfo.hStdOutput = target_stdout_write;
+            si.StartupInfo.hStdError  = target_stdout_write;
+        }
+
         DWORD create_flags = CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT;
         if (use_custom_env) create_flags |= CREATE_UNICODE_ENVIRONMENT;
         if (breakaway)      create_flags |= CREATE_BREAKAWAY_FROM_JOB;
@@ -508,6 +593,7 @@ static int run_launch(const LaunchConfig& cfg) {
     std::string         create_err;
 
     if (!create_sandboxed(cfg.breakaway, pi, create_err)) {
+        close_target_stdout_read();
         close_inherit_handles();
         emit_error("PROCESS_CREATE", create_err);
         return 1;
@@ -525,6 +611,7 @@ static int run_launch(const LaunchConfig& cfg) {
     JobObject job;
     if (FAILED(job.create())) {
         kill_process();
+        close_target_stdout_read();
         close_inherit_handles();
         emit_error("JOB_ASSIGN", "JobObject::create failed");
         return 1;
@@ -533,6 +620,7 @@ static int run_launch(const LaunchConfig& cfg) {
     HRESULT hr_apply_limits = job.apply_limits(cfg.job_config);
     if (FAILED(hr_apply_limits)) {
         kill_process();
+        close_target_stdout_read();
         close_inherit_handles();
         // Embeds the HRESULT so an out-of-range cpu_min_rate/cpu_max_rate
         // (E_INVALIDARG) reads as distinct from a SetInformationJobObject
@@ -561,6 +649,7 @@ static int run_launch(const LaunchConfig& cfg) {
     if (hr_assign == HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED) && !cfg.breakaway) {
         kill_process();
         if (!create_sandboxed(true, pi, create_err)) {
+            close_target_stdout_read();
             close_inherit_handles();
             emit_error("PROCESS_CREATE", create_err);
             return 1;
@@ -569,6 +658,7 @@ static int run_launch(const LaunchConfig& cfg) {
     }
     if (FAILED(hr_assign)) {
         kill_process();
+        close_target_stdout_read();
         close_inherit_handles();
         emit_error("JOB_ASSIGN",
                    "JobObject::assign failed ("
@@ -589,6 +679,7 @@ static int run_launch(const LaunchConfig& cfg) {
         std::string err = "ResumeThread failed (" + hex32(GetLastError()) + ")";
         TerminateProcess(pi.hProcess, 0);
         CloseHandle(pi.hProcess);
+        close_target_stdout_read();
         emit_error("PROCESS_CREATE", err);
         return 1;
     }
@@ -608,6 +699,7 @@ static int run_launch(const LaunchConfig& cfg) {
             + hex32(GetLastError()) + ")";
         TerminateProcess(pi.hProcess, 0);
         CloseHandle(pi.hProcess);
+        close_target_stdout_read();
         emit_error("PROCESS_CREATE", err);
         return 1;
     }
@@ -625,6 +717,7 @@ static int run_launch(const LaunchConfig& cfg) {
         std::string err = "DuplicateHandle to parent failed (" + hex32(dup_error) + ")";
         TerminateProcess(pi.hProcess, 0);
         CloseHandle(pi.hProcess);
+        close_target_stdout_read();
         emit_error("PROCESS_CREATE", err);
         return 1;
     }
@@ -672,6 +765,31 @@ static int run_launch(const LaunchConfig& cfg) {
     Watchdog watchdog(parent_handle, done_event);
     if (watchdog_usable) watchdog.start();
 
+    // Started here, not earlier: the target has been runnable since
+    // ResumeThread above, but nothing between there and here depends on it
+    // making progress, so a full pipe only stalls the target transiently
+    // rather than deadlocking the host. Started here, not later (e.g. only
+    // after the wait below): waiting until after the wait would mean the
+    // target could fill the pipe and block on WriteFile before any reader
+    // exists, which the wait below cannot detect or unblock, hanging both
+    // sides.
+    std::string target_output_buf;
+    std::thread target_output_thread;
+    if (cfg.capture_target_stdout) {
+        target_output_thread = std::thread([&target_output_buf, target_stdout_read]() {
+            char  chunk[4096];
+            DWORD n = 0;
+            while (ReadFile(target_stdout_read, chunk, sizeof(chunk), &n, nullptr) && n > 0) {
+                target_output_buf.append(chunk, n);
+            }
+            // ReadFile failing here (typically ERROR_BROKEN_PIPE, once
+            // every write handle is gone: the host's own copy was already
+            // closed by close_inherit_handles() above, and the target's
+            // inherited copy closes when it exits) is ordinary EOF for an
+            // anonymous pipe, not a real error worth reporting.
+        });
+    }
+
     DWORD wait_result;
     if (watchdog_usable) {
         HANDLE wait_handles[2] = { pi.hProcess, done_event };
@@ -697,11 +815,28 @@ static int run_launch(const LaunchConfig& cfg) {
 
     if (done_event) CloseHandle(done_event);
 
+    if (cfg.capture_target_stdout) {
+        // NOTE: if wait_result resolved via done_event (parent death) rather
+        // than pi.hProcess (target exit), the target may still be running
+        // here, still holding its inherited copy of the write end open.
+        // This join then blocks until the target actually exits (via this
+        // job's KILL_ON_JOB_CLOSE once this host process itself goes away,
+        // which cannot happen while blocked here) or writes enough for
+        // ReadFile to return, whichever comes first. Not resolved: a bounded
+        // wait with a forced CloseHandle(target_stdout_read) fallback would
+        // fix it but was not built here.
+        target_output_thread.join();
+        close_target_stdout_read();
+    }
+
     // Unblocks the Python stdout reader.
-    std::cout << JsonOut()
-        .set("stage",     std::string("exited"))
-        .set("exit_code", static_cast<long long>(exit_code))
-        .dump() << "\n";
+    JsonOut exited_json;
+    exited_json.set("stage",     std::string("exited"))
+               .set("exit_code", static_cast<long long>(exit_code));
+    if (cfg.capture_target_stdout) {
+        exited_json.set("target_output", target_output_buf);
+    }
+    std::cout << exited_json.dump() << "\n";
     std::cout.flush();
 
     // Unblocks the Python named-event watcher.

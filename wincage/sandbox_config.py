@@ -23,3 +23,5 @@ class SandboxConfig:
     skip_cpu_limit: bool = False
     memory_limit_mb: int | None = None
     breakaway: bool = False
+    should_revert_grants: bool = False
+    capture_target_stdout: bool = False

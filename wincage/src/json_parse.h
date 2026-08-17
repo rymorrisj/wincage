@@ -227,13 +227,31 @@ class JsonOut {
     std::string buf_;
     bool        first_ = true;
     static std::string quote(const std::string& s) {
+        static const char* hexdig = "0123456789abcdef";
         std::string r = "\"";
-        for (char c : s) {
+        // unsigned char: a signed char with the high bit set (any UTF-8
+        // continuation byte) sign-extends to a negative int, which would
+        // wrongly satisfy `c < 0x20` below and mangle it into a bogus
+        // \u00XX escape instead of passing it through as UTF-8 payload.
+        for (unsigned char c : s) {
             if      (c == '"')  r += "\\\"";
             else if (c == '\\') r += "\\\\";
             else if (c == '\n') r += "\\n";
             else if (c == '\r') r += "\\r";
-            else                r += c;
+            else if (c == '\t') r += "\\t";
+            else if (c == '\b') r += "\\b";
+            else if (c == '\f') r += "\\f";
+            else if (c < 0x20) {
+                // Every other C0 control byte must be escaped per RFC 8259;
+                // an unescaped one makes the whole line unparseable. Only
+                // matters once a string can hold uncontrolled data (e.g.
+                // captured target process output), but applies here to
+                // every JsonOut string for the same reason.
+                r += "\\u00";
+                r += hexdig[(c >> 4) & 0xF];
+                r += hexdig[c & 0xF];
+            }
+            else                r += static_cast<char>(c);
         }
         return r + '"';
     }

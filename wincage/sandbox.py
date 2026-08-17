@@ -57,6 +57,7 @@ def _build_stdin_payload(config: SandboxConfig) -> dict:
         },
         "parent_pid": os.getpid(),
         "breakaway": config.breakaway,
+        "capture_target_stdout": config.capture_target_stdout,
     }
 
 def _kill_and_drain(proc: subprocess.Popen) -> str:
@@ -147,6 +148,15 @@ class SandboxHandle:
     # A handle to the target process, duplicated across the process
     # boundary by the host. None if the host did not report one.
     process_handle: int | None = None
+    # Carried from SandboxConfig so _watch_event()'s CLEANED_UP dispatch can
+    # call revoke_grants() without needing its own thread-start arg.
+    broker_files: list[BrokerFile] = field(default_factory=list)
+    should_revert_grants: bool = False
+    capture_target_stdout: bool = False
+    # Populated by _watch_event() once the host's final "exited" JSON line is
+    # read, only when capture_target_stdout was set at launch. Stays None if
+    # capture_target_stdout was False, or if reading/parsing that line fails.
+    target_output: str | None = field(default=None, compare=False, hash=False)
     _callbacks: dict[SandboxEvent, list[Callable[[SandboxPayload], None]]] = field(
         default_factory=lambda: defaultdict(list),
         compare=False,
@@ -218,6 +228,35 @@ async def _watch_event(
     WAIT_OBJECT_0 = 0x00000000
     WAIT_TIMEOUT = 0x00000102
 
+    loop = asyncio.get_event_loop()
+
+    # Parked here, before any wait below, not only once the process has
+    # already exited: main.cpp's final "exited" JSON line (which carries
+    # target_output when capture_target_stdout is set) can be large, and if
+    # nothing is reading this pipe while the host writes it, a write past
+    # the OS pipe buffer blocks the host inside WriteFile before it can ever
+    # signal h_event or exit, hanging every wait below forever. Only started
+    # when the caller opted in, so callers who read handle._proc.stdout
+    # themselves (e.g. wincage.checker, which does not set this flag) see no
+    # new reader on that stream.
+    target_output_future: asyncio.Future[bytes] | None = None
+    if handle.capture_target_stdout and proc.stdout is not None:
+        target_output_future = loop.run_in_executor(None, proc.stdout.readline)
+
+    async def _resolve_target_output() -> None:
+        if target_output_future is None:
+            return
+        try:
+            line = await target_output_future
+            if line:
+                handle.target_output = json.loads(line).get("target_output")
+        except Exception:
+            logger.error(
+                "Failed to read target_output for moniker=%s",
+                handle.moniker,
+                exc_info=True,
+            )
+
     h_event = kernel32.OpenEventW(
         SYNCHRONIZE | EVENT_MODIFY_STATE,
         False,
@@ -240,6 +279,7 @@ async def _watch_event(
         # here without firing it would let terminate() hang forever.
         loop = asyncio.get_event_loop()
         rc = await loop.run_in_executor(None, proc.wait)
+        await _resolve_target_output()
         _fire(handle, SandboxEvent.EXITED, SandboxPayload(
             event=SandboxEvent.EXITED,
             moniker=handle.moniker,
@@ -248,6 +288,7 @@ async def _watch_event(
             error=error_reason,
             stage=None,
         ))
+        _revert_grants_if_configured(handle)
         _fire(handle, SandboxEvent.CLEANED_UP, SandboxPayload(
             event=SandboxEvent.CLEANED_UP,
             moniker=handle.moniker,
@@ -278,6 +319,8 @@ async def _watch_event(
 
         rc = proc.wait()
 
+        await _resolve_target_output()
+
         payload_exited = SandboxPayload(
             event=SandboxEvent.EXITED,
             moniker=handle.moniker,
@@ -287,6 +330,8 @@ async def _watch_event(
             stage=None,
         )
         _fire(handle, SandboxEvent.EXITED, payload_exited)
+
+        _revert_grants_if_configured(handle)
 
         payload_cleaned = SandboxPayload(
             event=SandboxEvent.CLEANED_UP,
@@ -300,6 +345,26 @@ async def _watch_event(
 
     finally:
         kernel32.CloseHandle(h_event)
+
+
+def _revert_grants_if_configured(handle: SandboxHandle) -> None:
+    """Best-effort revoke_grants() call for should_revert_grants at CLEANED_UP.
+
+    revoke_grants is a module-level function defined later in this file;
+    that's fine since this only runs after the module has fully loaded.
+    Exceptions are logged, not raised, so a revoke failure never blocks the
+    rest of cleanup or leaves SandboxHandle.terminate() hanging.
+    """
+    if not (handle.should_revert_grants and handle.broker_files):
+        return
+    try:
+        revoke_grants(handle.moniker, handle.broker_files)
+    except Exception:
+        logger.error(
+            "revoke_grants failed during cleanup for moniker=%s",
+            handle.moniker,
+            exc_info=True,
+        )
 
 
 def _fire(
@@ -520,6 +585,9 @@ def _build_sandbox_handle(
         container_sid=response["sid"],
         pid=pid,
         process_handle=response.get("process_handle"),
+        broker_files=config.broker_files,
+        should_revert_grants=config.should_revert_grants,
+        capture_target_stdout=config.capture_target_stdout,
         _callbacks=defaultdict(list),
         _proc=proc,
     )

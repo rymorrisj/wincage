@@ -6,7 +6,14 @@ import ctypes.wintypes as _wt
 from collections.abc import Mapping
 from pathlib import Path
 
-from ..sandbox import SandboxConfig, SandboxError, SandboxHandle, launch, reset_container
+from ..sandbox import (
+    SandboxConfig,
+    SandboxError,
+    SandboxHandle,
+    SandboxStage,
+    launch,
+    reset_container,
+)
 from ..sandbox_config import BrokerFile
 from .results import CheckResult, CheckStatus
 
@@ -102,6 +109,10 @@ DEFAULT_MONIKER_PREFIX: str = "SandboxChecker"
 #
 # What a probe verifies is a property of the capability, not the caller,
 # so which programs a failure impacts comes from run_checks(affects=...).
+# How long _async_run_one waits for a launched probe to exit on its own
+# before giving up, terminating it, and reporting a timeout failure.
+_PROBE_WAIT_TIMEOUT_SECONDS = 30.0
+
 _CHECKS: list[tuple[str, str, str]] = [
     (
         "sdl2_d3d11",
@@ -144,14 +155,33 @@ async def _async_run_one(
             affects=affects,
         )
 
-    # Checked while the process is still alive (or has only just exited),
-    # since the AppContainer token is assigned at process creation, before
-    # the target runs any of its own code. A confinement failure and a
-    # probe failure are different causes and get different messages below.
-    confinement_error = _verify_confinement(handle)
-
     try:
-        exit_code = await asyncio.to_thread(handle._proc.wait)
+        # Checked while the process is still alive (or has only just
+        # exited), since the AppContainer token is assigned at process
+        # creation, before the target runs any of its own code. A
+        # confinement failure and a probe failure are different causes and
+        # get different messages below. Inside the try so a raise here
+        # still reaches the finally's reset_container cleanup below.
+        confinement_error = _verify_confinement(handle)
+
+        try:
+            exit_code = await asyncio.wait_for(
+                asyncio.to_thread(handle._proc.wait),
+                timeout=_PROBE_WAIT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            handle._proc.terminate()
+            await asyncio.to_thread(handle._proc.wait)
+            return CheckResult(
+                name=name,
+                status=CheckStatus.FAIL,
+                message=(
+                    f"probe did not exit within "
+                    f"{_PROBE_WAIT_TIMEOUT_SECONDS:.0f}s, terminated"
+                ),
+                affects=affects,
+            )
+
         # sandbox_host.exe writes a final "exited" JSON line after launch()
         # already consumed the started-line; drain it so it's not left unread.
         stdout_text = b""
@@ -212,6 +242,16 @@ def _run_one(
             affects=affects,
         )
 
+    # 1:1 naming per build_tests.sh: test_foo.cpp builds test_foo.exe.
+    src = exe.with_suffix(".cpp")
+    if src.exists() and src.stat().st_mtime > exe.stat().st_mtime:
+        return CheckResult(
+            name=name,
+            status=CheckStatus.SKIP,
+            message="stale binary, rebuild: source is newer than the compiled exe, run build_tests.sh",
+            affects=affects,
+        )
+
     config = SandboxConfig(
         moniker=f"{moniker_prefix}.{name}",
         exe_path=str(exe),
@@ -222,6 +262,9 @@ def _run_one(
         ],
         cpu_max_rate=50,
         cpu_min_rate=5,
+        # Each run provisions a real AppContainer profile and grants it a DACL
+        # ACE on _SRC; without this the ACE is left behind on every run.
+        should_revert_grants=True,
     )
 
     return asyncio.run(_async_run_one(name, config, pass_message, affects))
@@ -233,9 +276,12 @@ def run_checks(
 ) -> list[CheckResult]:
     """Run every capability probe and return one CheckResult per probe.
 
-    Never raises:
+    Never raises for a per-probe failure:
         - A probe that cannot launch, or that exits non-zero, comes back as CheckStatus.FAIL.
-        - A probe whose binary was never built comes back as CheckStatus.SKIP.
+        - A probe whose binary was never built, or is older than its source, comes back as CheckStatus.SKIP.
+
+    Raises SandboxError if called from within a running event loop, since
+    each probe launch internally needs asyncio.run().
 
     Args:
         moniker_prefix: AppContainer moniker prefix for the probe profiles, which
@@ -252,6 +298,23 @@ def run_checks(
     """
     # sandbox_host.exe must be built alongside wincage/ before calling
     # run_checks(), see the repo root README.md.
+    # _run_one() calls asyncio.run() per probe, which raises a raw RuntimeError
+    # if a loop is already running on this thread. Detect that up front and
+    # fail with a clear SandboxError instead of letting that leak.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise SandboxError(
+            message="run_checks() cannot be called from within a running event loop",
+            stage=SandboxStage.CONFIG_VALIDATION,
+            suggestions=[
+                "Call run_checks() from synchronous code with no event loop "
+                "running, or run it in a separate thread",
+            ],
+        )
+
     affects_map: Mapping[str, list[str]] = affects or {}
 
     results: list[CheckResult] = []
