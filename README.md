@@ -6,9 +6,11 @@
 [![Native build: MSYS2 UCRT64](https://img.shields.io/badge/native%20build-MSYS2%20UCRT64-purple.svg)](https://github.com/msys2)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[Peach 1UP](https://github.com/rymorrisj/peach_1up) runs a wide variety of third-party emulator software, and that software doesn't always behave. Hanging processes, memory leaks, and runaway CPU usage are common failure modes with binaries you didn't write and can't patch. wincage gives a host application a control layer over that: hard resource limits and process isolation. GPU and audio access stay intact, which those emulators need to work.
+wincage gives a host a control layer with hard resource limits and process isolation. GPU and audio access stay intact. Originally built as small scripts inside [Peach 1UP](https://github.com/rymorrisj/peach_1up) I extracted it out, and generalized it so as to be a more general tool for others.
 
 Windows process sandboxing. Runs an executable inside an AppContainer with a Job Object applying CPU/memory limits. Includes a diagnostic package: a baseline check that core confinement works at all, plus optional probes for whether a machine's AppContainer allows the graphics/audio API stacks a sandboxed process needs.
+
+[Peach 1UP](https://github.com/rymorrisj/peach_1up) runs a wide variety of third-party emulator software, and that software doesn't always behave. Hanging processes, memory leaks, and runaway CPU usage are common failure modes with binaries you didn't write and can't patch.
 
 | Package | Purpose |
 |---|---|
@@ -48,7 +50,7 @@ pip install wincage
 ```
 
 The wheel ships `sandbox_host.exe`, the checker's GPU probe binaries and DLLs
-(`test_sdl2_d3d11.exe`, `test_sdl2_opengl.exe`, `test_qt_qpa.exe`, `SDL2.dll`,
+(`test_sdl2_d3d11.exe`, `test_sdl2_opengl.exe`, `SDL2.dll`,
 `libwinpthread-1.dll`), and the `scripts/*.ps1` diagnostics. No
 MSYS2, no GCC, nothing beyond Python is needed if you just need wincage as is.
 
@@ -285,6 +287,7 @@ wincage/                  # sandbox core
 ├── build.sh              # builds sandbox_host.exe
 ├── src/                  # sandbox_host.exe C++ source
 ├── scripts/               # runtime diagnostic PowerShell scripts
+├── tests/                 # regression test suite (run_tests.py)
 └── checker/               # nested diagnostic subpackage
     ├── __init__.py       # public exports
     ├── checker.py        # run_checks() / run_baseline_checks() / run_gpu_checks()
@@ -292,19 +295,15 @@ wincage/                  # sandbox core
     └── src/               # capability-probe test programs + build_tests.sh
 ```
 
-## Tests
-
-`wincage/tests/` holds the manual verification scripts used during development that kind of became the current test suit.
-
-Run them with `python wincage/tests/run_tests.py`, which runs every `test_*.py` script in the directory and prints a pass/fail/skip line for each.
-
 ## Tests, diagnostics, and checks
 
 This repo has three separate things that look like "tests":
 
-- `wincage/tests/`: the actual regression suite. Run `python wincage/tests/run_tests.py` after
-  touching `sandbox.py`, `sandbox_config.py`, `main.cpp`, or `checker.py`. `test_job_inspect.py` runs
-  separately by hand (use Process Explorer or similar to inspect the Job).
+- `wincage/tests/`: the actual regression suite, started as manual verification scripts used
+  during development that became the current test suite. Run `python wincage/tests/run_tests.py`
+  after touching `sandbox.py`, `sandbox_config.py`, `main.cpp`, or `checker.py`; it runs every
+  `test_*.py` script in the directory and prints a pass/fail/skip line for each.
+  `test_job_inspect.py` runs separately by hand (use Process Explorer or similar to inspect the Job).
 - `wincage/scripts/*.ps1`: diagnostic tools for a live process, not a test suite. Use them to check
   AppContainer/Job Object isolation on something already running. See [Runtime diagnostic
   scripts](#runtime-diagnostic-scripts).
@@ -317,15 +316,15 @@ This repo has three separate things that look like "tests":
 ## Known limitations
 
 - **DACL grants persist on the path.** `mode="grant"`/`"secure"` modify the filesystem ACL and don't revert on exit. `grant` also propagates its ACE across the existing tree. Broker only what's needed, and prefer `secure`/`inherit` over `grant` for a single file. Set `should_revert_grants=True` on `SandboxConfig` to have grants revoked automatically at cleanup, call `revoke_grants(moniker, broker_files)` yourself with the same list you granted with, or pass that same list to `reset_container(moniker, broker_files)` since deleting the profile alone doesn't revoke its ACEs either.
-- **A crash mid-grant can leave a stray marker file.**`grant_directory`/`revoke_directory` write a `:wincage.pending` marker before it starts and removes it when done. If the process is killed partway the marker is left behind. It's harmless, the only effect is that the next grant or revoke on that folder redoes the full check instead of trusting the previous one.
+- **A crash mid-grant can leave a stray marker file.** `grant_directory`/`revoke_directory` write a `:wincage.pending` marker before it starts and removes it when done. If the process is killed partway the marker is left behind. It's harmless, the only effect is that the next grant or revoke on that folder redoes the full check instead of trusting the previous one.
 - **That marker doesn't work on FAT32/exFAT drives.** It relies on an NTFS/ReFS-only feature. On FAT32 or exFAT, the marker silently fails to write, so a crash mid-grant won't be detected or corrected automatically. NTFS/ReFS are the filesystems Windows uses for its main C drive
 - **`broker_files` paths are capped at MAX_PATH (260 characters).** Grant/secure/inherit all reach the file through the plain Win32 file APIs, no `\\?\` long-path prefix. A longer path fails the grant outright.
-- **Low level device I/O is not sandboxed** `DeviceIoControl` is a function in kernel32.dll that AppContainer blocks acces to without additional steps wincage does not take. Use `launch_suspended()`/`run_under_job()`, the native path, instead for these processes. 
+- **Low level device I/O is not sandboxed.** AppContainer blocks `DeviceIoControl` by default, and wincage doesn't currently do the extra work needed to allow it. Use `launch_suspended()`/`run_under_job()`, the native path, instead for these processes.
 - **AppContainer confinement grants zero capabilities.** wincage never populates `SECURITY_CAPABILITIES.Capabilities`/`CapabilityCount`, so every confined process gets Windows default/deny result for named capabilities: 
   - no network access (no `internetClient`)
   - no device/sensor access (camera, microphone, GPS, cellular)
   
-  Any target process that needs these will fail under confinement, this is Windows own AppContainer default/deny behavior, not a wincage bug. There's currently no `SandboxConfig` option to request specific capabilities. If your workload needs network or device access, don't enable AppContainer confinement for it, Job Object limits alone remain available without this restriction. Looking into adding support for this in the backlog below
+  Any target process that needs these will fail under confinement, this is Windows' own AppContainer default/deny behavior, not a wincage bug. There's currently no `SandboxConfig` option to request specific capabilities. If your workload needs network or device access, don't enable AppContainer confinement for it, Job Object limits alone remain available without this restriction. Looking into adding support for this in the backlog below
 - **The Qt/QPA confinement probe (`qt_qpa`) is currently disabled.** `build_tests.sh` no longer builds `test_qt_qpa.exe`, and `run_gpu_checks()` reports it as `SKIP`. Building it produced a binary with an unresolved runtime DLL dependency (`STATUS_DLL_NOT_FOUND`) that persisted across multiple packaging approaches, including manual dependency copying and `windeployqt-qt5.exe`. This does not affect wincage's core functionality or the SDL2-based GPU checks (`sdl2_d3d11`, `sdl2_opengl`), which work correctly. Tracked as a backlog item below.
 
 ## Backlog
@@ -346,7 +345,9 @@ Read this before relying on `wincage` as a hard security control layer
 
 ## Contributing
 
-Open an issue for bugs or platform-compatibility gaps. Changes to the AppContainer/Job Object provisioning code (`sandbox_host.exe`, `src/`) should include the reasoning behind any new native Win32 call, since a mistake there is a crash-fault-boundary concern, not just a bug.
+Open an issue for bugs or platform-compatibility gaps. Changes to the AppContainer/Job Object provisioning code (`sandbox_host.exe`, `src/`) should include the reasoning behind any new native Win32 call.
+
+I will support this package for a time but my primary focus is [Peach 1UP](https://github.com/rymorrisj/peach_1up). Would love any help or consideration others would like to give if they find this useful. 
 
 ## License
 
