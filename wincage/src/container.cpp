@@ -153,6 +153,7 @@ ContainerResult AppContainer::provision() {
         }
     }
 
+    last_provision_error_ = hr;
     return ContainerResult::Failed;
 }
 
@@ -258,8 +259,6 @@ HRESULT AppContainer::secure_existing_file(const std::wstring& path, DWORD acces
 }
 
 HRESULT AppContainer::grant_directory(const std::wstring& path, DWORD access_mask) {
-    // TODO: per-container ACEs accumulate on shared grant dirs and are never
-    // removed, including when the container profile is deleted.
     if (!sid_) return E_POINTER;
 
     PACL existing_acl = nullptr;
@@ -338,7 +337,7 @@ bool has_ace_for_sid(PACL acl, PSID sid) {
 
 }  // namespace
 
-HRESULT AppContainer::revoke_existing_file(const std::wstring& path) {
+HRESULT AppContainer::revoke_existing_file(const std::wstring& path, bool& had_ace) {
     if (!sid_) return E_POINTER;
 
     PACL existing_acl = nullptr;
@@ -353,8 +352,13 @@ HRESULT AppContainer::revoke_existing_file(const std::wstring& path) {
         &sd
     );
     // A path that's already gone has nothing left to revoke.
-    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) return S_OK;
+    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+        had_ace = false;
+        return S_OK;
+    }
     if (err != ERROR_SUCCESS) return HRESULT_FROM_WIN32(err);
+
+    had_ace = has_ace_for_sid(existing_acl, sid_);
 
     EXPLICIT_ACCESS_W ea = {};
     // grfAccessPermissions is left zero: SetEntriesInAclW ignores it when
@@ -382,7 +386,7 @@ HRESULT AppContainer::revoke_existing_file(const std::wstring& path) {
     return HRESULT_FROM_WIN32(err);
 }
 
-HRESULT AppContainer::revoke_directory(const std::wstring& path) {
+HRESULT AppContainer::revoke_directory(const std::wstring& path, bool& had_ace) {
     if (!sid_) return E_POINTER;
 
     PACL existing_acl = nullptr;
@@ -396,14 +400,18 @@ HRESULT AppContainer::revoke_directory(const std::wstring& path) {
         &existing_acl, nullptr,
         &sd
     );
-    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) return S_OK;
+    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+        had_ace = false;
+        return S_OK;
+    }
     if (err != ERROR_SUCCESS) return HRESULT_FROM_WIN32(err);
 
     // A marker left behind by an interrupted walk, grant's or revoke's, means
     // the root's current ACE state doesn't prove the whole tree matches it,
     // so the fast path below must not trust it.
-    bool already_revoked = !grant_marker_present(path)
-        && !has_ace_for_sid(existing_acl, sid_);
+    bool marker_present = grant_marker_present(path);
+    had_ace = has_ace_for_sid(existing_acl, sid_);
+    bool already_revoked = !marker_present && !had_ace;
     if (sd) LocalFree(sd);
     if (already_revoked) return S_OK;
 

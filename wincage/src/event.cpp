@@ -24,13 +24,17 @@ EventResult SandboxEvent::create() {
         FALSE,  // initially not signaled
         name_.c_str()
     );
-    if (!handle_) return EventResult::Failed;
+    if (!handle_) {
+        last_create_error_ = GetLastError();
+        return EventResult::Failed;
+    }
 
     // CreateEventW returns the EXISTING event on a name collision instead of
     // failing, which could let two unrelated launches share one kernel event and
     // unblock each other's watcher. The PID suffix above should make this
     // unreachable, but it's treated as fatal rather than silently shared.
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        last_create_error_ = ERROR_ALREADY_EXISTS;
         CloseHandle(handle_);
         handle_ = nullptr;
         return EventResult::Failed;

@@ -755,3 +755,16 @@ def revoke_grants(moniker: str, broker_files: list[BrokerFile]) -> None:
             stage=SandboxStage.DACL_REVOKE,
             suggestions=[],
         )
+
+    # SetEntriesInAclW(REVOKE_ACCESS) succeeds as a no-op on a SID with no matching
+    # ACE, so a clean return here doesn't by itself mean anything was revoked.
+    # checked_count/revoked_count let a mistyped or already-revoked moniker be
+    # told apart from one that actually had grants removed.
+    response = _parse_error_response(proc.stdout)
+    if response is not None and response.get("checked_count", 0) > 0 \
+            and response.get("revoked_count", 0) == 0:
+        logger.warning(
+            "revoke_grants for moniker '%s' matched no ACEs on any broker_files "
+            "entry; the moniker may be mistyped or the grant already revoked",
+            moniker,
+        )

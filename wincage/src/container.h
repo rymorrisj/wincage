@@ -18,6 +18,9 @@ public:
     AppContainer& operator=(const AppContainer&) = delete;
 
     ContainerResult provision();
+    // The HRESULT behind a provision() == Failed result. CreateAppContainerProfile's
+    // HRESULT isn't visible through ContainerResult otherwise.
+    HRESULT last_provision_error() const { return last_provision_error_; }
     HRESULT grant_window_station();
     HRESULT secure_existing_file(const std::wstring& path, DWORD access_mask);
     HRESULT grant_directory(const std::wstring& path, DWORD access_mask);
@@ -25,8 +28,11 @@ public:
     // Computes sid_ from moniker_ without provisioning a profile. revoke has no
     // reason to create a profile just to compute the SID it's removing ACEs for.
     HRESULT derive_sid();
-    HRESULT revoke_existing_file(const std::wstring& path);
-    HRESULT revoke_directory(const std::wstring& path);
+    // had_ace reports whether the SID actually carried an ACE here before this
+    // call, so a caller can tell "revoked something" from "matched nothing"
+    // (e.g. a mistyped moniker) even though both return S_OK.
+    HRESULT revoke_existing_file(const std::wstring& path, bool& had_ace);
+    HRESULT revoke_directory(const std::wstring& path, bool& had_ace);
 
     PSID sid() const { return sid_; }
 
@@ -35,4 +41,5 @@ public:
 private:
     std::wstring moniker_;
     PSID sid_ = nullptr;
+    HRESULT last_provision_error_ = S_OK;
 };

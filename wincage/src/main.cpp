@@ -318,18 +318,26 @@ static int run_revoke(const std::wstring& moniker,
         return 1;
     }
 
+    // Lets the caller tell "revoked something" from "matched nothing" (e.g. a
+    // mistyped moniker): SetEntriesInAclW(REVOKE_ACCESS) succeeds as a no-op
+    // either way, so the return code alone can't distinguish them.
+    int checked_count = 0;
+    int revoked_count = 0;
+
     for (const BrokerFile& bf : broker_files) {
         // "inherit" mode never touched the DACL. grant_directory() is what
         // grants a DACL ACE for "grant"; secure_existing_file() for "secure".
         if (bf.mode == L"inherit") continue;
+        checked_count++;
 
         HRESULT entry_hr;
+        bool had_ace = false;
         const char* what;
         if (bf.mode == L"grant") {
-            entry_hr = container.revoke_directory(bf.path);
+            entry_hr = container.revoke_directory(bf.path, had_ace);
             what = "revoke_directory";
         } else if (bf.mode == L"secure") {
-            entry_hr = container.revoke_existing_file(bf.path);
+            entry_hr = container.revoke_existing_file(bf.path, had_ace);
             what = "revoke_existing_file";
         } else {
             emit_error("DACL_REVOKE", "unrecognised broker_file mode '"
@@ -344,9 +352,14 @@ static int run_revoke(const std::wstring& moniker,
                            + "' (" + hex32(static_cast<DWORD>(entry_hr)) + ")");
             return 1;
         }
+        if (had_ace) revoked_count++;
     }
 
-    std::cout << JsonOut().set("stage", std::string("revoked")).dump() << "\n";
+    std::cout << JsonOut()
+        .set("stage",          std::string("revoked"))
+        .set("checked_count",  static_cast<long long>(checked_count))
+        .set("revoked_count",  static_cast<long long>(revoked_count))
+        .dump() << "\n";
     std::cout.flush();
     return 0;
 }
@@ -356,12 +369,16 @@ static int run_launch(const LaunchConfig& cfg) {
     auto cr = container.provision();
     if (cr == ContainerResult::Failed) {
         emit_error("CONTAINER_PROVISION",
-                   "CreateAppContainerProfile failed");
+                   "CreateAppContainerProfile failed ("
+                       + hex32(static_cast<DWORD>(container.last_provision_error())) + ")");
         return 1;
     }
 
-    if (FAILED(container.grant_window_station())) {
-        emit_error("CONTAINER_PROVISION", "grant_window_station failed");
+    HRESULT hr_grant_winstation = container.grant_window_station();
+    if (FAILED(hr_grant_winstation)) {
+        emit_error("CONTAINER_PROVISION",
+                   "grant_window_station failed ("
+                       + hex32(static_cast<DWORD>(hr_grant_winstation)) + ")");
         return 1;
     }
 
@@ -493,7 +510,8 @@ static int run_launch(const LaunchConfig& cfg) {
     if (evt.create() == EventResult::Failed) {
         close_target_stdout_read();
         close_inherit_handles();
-        emit_error("PROCESS_CREATE", "CreateEventW failed");
+        emit_error("PROCESS_CREATE",
+                   "CreateEventW failed (" + hex32(evt.last_create_error()) + ")");
         return 1;
     }
 
@@ -581,11 +599,13 @@ static int run_launch(const LaunchConfig& cfg) {
     // Limits are applied before assignment so the process can never run outside
     // its caps once resumed.
     JobObject job;
-    if (FAILED(job.create())) {
+    HRESULT hr_job_create = job.create();
+    if (FAILED(hr_job_create)) {
         kill_process();
         close_target_stdout_read();
         close_inherit_handles();
-        emit_error("JOB_ASSIGN", "JobObject::create failed");
+        emit_error("JOB_ASSIGN",
+                   "JobObject::create failed (" + hex32(static_cast<DWORD>(hr_job_create)) + ")");
         return 1;
     }
 
@@ -761,8 +781,18 @@ static int run_launch(const LaunchConfig& cfg) {
         wait_result = WaitForSingleObject(pi.hProcess, INFINITE);
     }
 
+    // wait_handles[1] (done_event) woke the wait above, not pi.hProcess: the
+    // watchdog saw the parent die, and the child may still be running. Captured
+    // before GetExitCodeProcess so a legitimate STILL_ACTIVE result below can be
+    // told apart from an actual exit code of 259.
+    bool parent_died_first =
+        watchdog_usable && wait_result == static_cast<DWORD>(WAIT_OBJECT_0 + 1);
+
     DWORD exit_code = 0;
-    GetExitCodeProcess(pi.hProcess, &exit_code);
+    BOOL  got_exit_code    = GetExitCodeProcess(pi.hProcess, &exit_code);
+    DWORD exit_code_error  = got_exit_code ? 0 : GetLastError();
+    bool  child_still_running =
+        parent_died_first && got_exit_code && exit_code == STILL_ACTIVE;
     CloseHandle(pi.hProcess);
 
     if (done_event) CloseHandle(done_event);
@@ -779,10 +809,24 @@ static int run_launch(const LaunchConfig& cfg) {
         close_target_stdout_read();
     }
 
+    if (!got_exit_code) {
+        emit_error("PROCESS_CREATE",
+                   "GetExitCodeProcess failed (" + hex32(exit_code_error) + ")");
+        // Unblocks the Python named-event watcher; it must not hang just
+        // because the exit code itself couldn't be read.
+        evt.signal();
+        return 1;
+    }
+
     // Unblocks the Python stdout reader.
     JsonOut exited_json;
     exited_json.set("stage",     std::string("exited"))
                .set("exit_code", static_cast<long long>(exit_code));
+    if (child_still_running) {
+        // exit_code above is STILL_ACTIVE because the parent died before the
+        // child did, not because the child actually exited with code 259.
+        exited_json.set("parent_died_child_running", true);
+    }
     if (cfg.capture_target_stdout) {
         exited_json.set("target_output", target_output_buf);
     }

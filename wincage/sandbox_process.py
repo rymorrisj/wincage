@@ -112,9 +112,16 @@ class SandboxProcess:
             if result == _WAIT_TIMEOUT:
                 return -1
             exit_code = ctypes.wintypes.DWORD(0)
-            ctypes.windll.kernel32.GetExitCodeProcess(
+            ok = ctypes.windll.kernel32.GetExitCodeProcess(
                 self._process_handle, ctypes.byref(exit_code)
             )
+            if not ok:
+                # Same reasoning as poll(): the BOOL return says whether exit_code is
+                # meaningful, and handles must stay open since the caller never saw a result.
+                error_code = ctypes.windll.kernel32.GetLastError()
+                raise RuntimeError(
+                    f"GetExitCodeProcess failed for pid={self.pid}. Error code: {error_code}"
+                )
             self.returncode = exit_code.value
             self._close_handles()
             return self.returncode
