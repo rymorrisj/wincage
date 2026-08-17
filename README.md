@@ -326,11 +326,13 @@ This repo has three separate things that look like "tests":
   - no device/sensor access (camera, microphone, GPS, cellular)
   
   Any target process that needs these will fail under confinement, this is Windows own AppContainer default/deny behavior, not a wincage bug. There's currently no `SandboxConfig` option to request specific capabilities. If your workload needs network or device access, don't enable AppContainer confinement for it, Job Object limits alone remain available without this restriction. Looking into adding support for this in the backlog below
+- **The Qt/QPA confinement probe (`qt_qpa`) is currently disabled.** `build_tests.sh` no longer builds `test_qt_qpa.exe`, and `run_gpu_checks()` reports it as `SKIP`. Building it produced a binary with an unresolved runtime DLL dependency (`STATUS_DLL_NOT_FOUND`) that persisted across multiple packaging approaches, including manual dependency copying and `windeployqt-qt5.exe`. This does not affect wincage's core functionality or the SDL2-based GPU checks (`sdl2_d3d11`, `sdl2_opengl`), which work correctly. Tracked as a backlog item below.
 
 ## Backlog
 
 - Capability requests: AppContainer grants zero capabilities by default (no network, no device/sensor access), and there is currently no `SandboxConfig` option to request specific capabilities for a confined process.
 - `revoke_grants()` only logs a warning on a no-op revoke (moniker matches nothing). Could return a structured result instead of/alongside logging, so a caller can detect this programmatically.
+- `qt_qpa` probe: re-enable once `test_qt_qpa.exe`'s unresolved runtime DLL dependency (`STATUS_DLL_NOT_FOUND`) is fixed. See Known Limitations above.
 
 ## Security disclaimer
 

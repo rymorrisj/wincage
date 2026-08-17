@@ -98,6 +98,17 @@ DEFAULT_MONIKER_PREFIX: str = "SandboxChecker"
 # terminating it and reporting a timeout failure.
 _PROBE_WAIT_TIMEOUT_SECONDS = 30.0
 
+# Probe names disabled here on purpose (build_tests.sh no longer builds their
+# exe either), mapped to the SKIP message reported instead of attempting a
+# launch. See README.md's Known Limitations section and Backlog.
+_DISABLED_CHECKS: dict[str, str] = {
+    "qt_qpa": (
+        "disabled: test_qt_qpa.exe has an unresolved runtime DLL dependency "
+        "(STATUS_DLL_NOT_FOUND) that survived manual DLL copying and "
+        "windeployqt-qt5.exe; see README.md Known Limitations"
+    ),
+}
+
 # (name, exe_name, pass_message); which programs a failure affects is
 # supplied by the caller via run_gpu_checks(affects=...), not stored here.
 _CHECKS: list[tuple[str, str, str]] = [
@@ -287,6 +298,16 @@ def run_gpu_checks(
 
     results: list[CheckResult] = []
     for name, exe_name, pass_message in _CHECKS:
+        if name in _DISABLED_CHECKS:
+            results.append(
+                CheckResult(
+                    name=name,
+                    status=CheckStatus.SKIP,
+                    message=_DISABLED_CHECKS[name],
+                    affects=list(affects_map.get(name, [])),
+                )
+            )
+            continue
         results.append(
             _run_one(
                 name,
