@@ -3,7 +3,7 @@
 [![Windows Only](https://img.shields.io/badge/platform-Windows--10%20%2F%2011-blue.svg)](https://microsoft.com/windows)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![Runtime Dependencies: Zero](https://img.shields.io/badge/runtime%20deps-zero-brightgreen.svg)]()
-[![Build: MSYS2 UCRT64](https://img.shields.io/badge/build-MSYS2%20UCRT64-purple.svg)](https://github.com/msys2)
+[![Native build: MSYS2 UCRT64](https://img.shields.io/badge/native%20build-MSYS2%20UCRT64-purple.svg)](https://github.com/msys2)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 [Peach 1UP](https://github.com/rymorrisj/peach_1up) runs a wide variety of third-party emulator software, and that software doesn't always behave. Hanging processes, memory leaks, and runaway CPU usage are common failure modes with binaries you didn't write and can't patch. wincage gives a host application a control layer over that: hard resource limits and process isolation. GPU and audio access stay intact, which those emulators need to work.
@@ -17,7 +17,7 @@ Windows process sandboxing. Runs an executable inside an AppContainer with a Job
 
 ## Requirements
 
-`wincage` core has no GPU or hardware dependency. It works on any host meeting the OS/Python/build-toolchain requirements.
+`wincage` core has no GPU or hardware dependency. It works on any host meeting the OS and Python requirements below. A build toolchain (MSYS2 UCRT64/GCC) is only needed if you're building from source; `pip install wincage` ships prebuilt binaries and needs nothing beyond Python. See [Install / build](#install--build) for both paths.
 
 Confirmed on Windows 10 and 11. The Job Object CPU rate control APIs wincage uses are documented as
 available since Windows 8, so wincage may work there too, but that is unconfirmed: this project has
@@ -38,6 +38,24 @@ AppContainer and Job Object solve different problems, both needed:
 Provisioning runs in a separate native process, `sandbox_host.exe`, not in-process via `ctypes`. This is a crash-fault boundary, not a style choice. A hard fault in native AppContainer/Job Object code crashes whatever process runs it. Windows 11 places nearly every process in a job by default, so an in-process crash would take the host down and cascade-kill everything else it launched via `KILL_ON_JOB_CLOSE`. As a separate child process, the same crash costs one failed launch instead.
 
 ## Install / build
+
+Two ways to get wincage, for two different purposes.
+
+### Install with pip (prebuilt binaries)
+
+```sh
+pip install wincage
+```
+
+The wheel ships `sandbox_host.exe`, the checker's GPU probe binaries and DLLs
+(`test_sdl2_d3d11.exe`, `test_sdl2_opengl.exe`, `test_qt_qpa.exe`, `SDL2.dll`,
+`libwinpthread-1.dll`), and the `scripts/*.ps1` diagnostics. No
+MSYS2, no GCC, nothing beyond Python is needed if you just need wincage as is.
+
+### Build from source (MSYS2 UCRT64)
+
+Only needed if you're modifying the C++ source, or building from a git
+checkout instead of a released wheel.
 
 Requires GCC from MSYS2 UCRT64:
 
@@ -61,9 +79,9 @@ Build the checker's capability probes separately if you need GPU checks:
 bash wincage/checker/src/build_tests.sh
 ```
 
-Outputs `test_sdl2_d3d11.exe`, `test_sdl2_opengl.exe`, and (if Qt is available) `test_qt_qpa.exe` into `wincage/checker/src/`. Neither binary set is committed. Both must be built on the host system before use.
+Outputs `test_sdl2_d3d11.exe`, `test_sdl2_opengl.exe`, and (if Qt is available) `test_qt_qpa.exe` into `wincage/checker/src/`. Neither binary set is committed to git; building from a git checkout means building both yourself. (A released wheel from `pip install wincage` already includes them prebuilt, see above.)
 
-Install the Python package:
+Install the Python package from the checkout:
 
 ```sh
 pip install -e .
